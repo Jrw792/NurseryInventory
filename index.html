@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+<meta name="theme-color" content="#1a1f1a" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Nursery" />
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<title>Nursery Ops</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">◆</div>
+    <div class="brand-text">
+      <div class="brand-title">NURSERY OPS</div>
+      <div class="brand-sub" id="brand-sub">Order Filler</div>
+    </div>
+  </div>
+  <button id="menu-btn" class="icon-btn" aria-label="Menu">☰</button>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-view="run">RUN</button>
+  <button class="tab" data-view="orders">ORDERS</button>
+  <button class="tab" data-view="history">HISTORY</button>
+  <button class="tab" data-view="inventory">INVENTORY</button>
+  <button class="tab" data-view="map">MAP</button>
+  <button class="tab" data-view="settings">SETTINGS</button>
+</nav>
+
+<main id="app">
+
+  <!-- ===================== RUN VIEW ===================== -->
+  <section class="view active" data-view="run">
+    <div class="run-header">
+      <div class="run-title">TODAY'S PICK RUN</div>
+      <div class="run-stats" id="run-stats">No active run</div>
+    </div>
+
+    <div id="run-empty" class="empty-state">
+      <div class="empty-icon">◰</div>
+      <div class="empty-title">No run started</div>
+      <div class="empty-sub">Add orders, then build your route.</div>
+      <button class="btn btn-primary" id="start-build-route">BUILD ROUTE</button>
+    </div>
+
+    <div id="run-active" class="hidden">
+      <div class="run-mode-toggle">
+        <button class="mode-btn active" data-mode="route">BY ROUTE</button>
+        <button class="mode-btn" data-mode="order">BY ORDER</button>
+      </div>
+      <div class="stops-list" id="stops-list"></div>
+      <div class="run-footer">
+        <button class="btn btn-ghost" id="reset-run">RESET</button>
+        <button class="btn btn-ghost" id="rebuild-route">REBUILD</button>
+        <button class="btn btn-primary" id="complete-run">COMPLETE</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== HISTORY VIEW ===================== -->
+  <section class="view" data-view="history">
+    <div class="section-head">
+      <div class="section-title">COMPLETED RUNS</div>
+      <button class="btn btn-small" id="export-history-csv">EXPORT CSV</button>
+    </div>
+    <div id="history-list" class="orders-list"></div>
+  </section>
+
+  <!-- ===================== ORDERS VIEW ===================== -->
+  <section class="view" data-view="orders">
+    <div class="section-head">
+      <div class="section-title">ORDERS</div>
+      <button class="btn btn-small" id="add-order-btn">+ ORDER</button>
+    </div>
+
+    <div class="paste-card">
+      <div class="paste-label">Bulk paste (one line per item)</div>
+      <div class="paste-hint">Format: <code>order#, product, qty, pot</code></div>
+      <textarea id="bulk-input" placeholder="1001, Japanese Maple, 3, 7 Gal
+1001, Boxwood, 12, 3 Gal
+1002, Red Oak, 1, 45 Gal"></textarea>
+      <button class="btn btn-primary" id="bulk-import">IMPORT</button>
+    </div>
+
+    <div id="orders-list" class="orders-list"></div>
+  </section>
+
+  <!-- ===================== INVENTORY VIEW ===================== -->
+  <section class="view" data-view="inventory">
+    <div class="section-head">
+      <div class="section-title">INVENTORY</div>
+      <button class="btn btn-small" id="add-product-btn">+ PRODUCT</button>
+    </div>
+
+    <div class="search-bar">
+      <input type="text" id="inv-search" placeholder="Search products..." />
+    </div>
+
+    <div id="inventory-list" class="inventory-list"></div>
+  </section>
+
+  <!-- ===================== MAP VIEW ===================== -->
+  <section class="view" data-view="map">
+    <div class="section-head">
+      <div class="section-title">FACILITY MAP</div>
+      <button class="btn btn-small" id="map-config-btn">CONFIG</button>
+    </div>
+
+    <div class="map-legend">
+      <div class="legend-item"><span class="legend-dot legend-entrance"></span>Entrance</div>
+      <div class="legend-item"><span class="legend-dot legend-zone"></span>Zone</div>
+      <div class="legend-item"><span class="legend-dot legend-aisle"></span>Aisle</div>
+    </div>
+
+    <div class="map-wrap">
+      <div id="facility-map" class="facility-map"></div>
+    </div>
+
+    <div class="map-info" id="map-info">
+      Tap a cell to view contents or mark as entrance.
+    </div>
+  </section>
+
+  <!-- ===================== SETTINGS VIEW ===================== -->
+  <section class="view" data-view="settings">
+    <div class="section-head">
+      <div class="section-title">SETTINGS</div>
+    </div>
+
+    <div class="settings-card">
+      <div class="settings-title">MACHINE RULES</div>
+      <div class="settings-desc">Determines which vehicle to use based on pot size and quantity.</div>
+      <div id="machine-rules"></div>
+      <button class="btn btn-ghost btn-small" id="reset-rules">RESET TO DEFAULTS</button>
+    </div>
+
+    <div class="settings-card">
+      <div class="settings-title">POT SIZES</div>
+      <div class="chip-row" id="pot-sizes-list"></div>
+    </div>
+
+    <div class="settings-card">
+      <div class="settings-title">DATA</div>
+      <div class="settings-desc">Export a backup or wipe everything.</div>
+      <div class="button-row">
+        <button class="btn btn-ghost" id="export-data">EXPORT</button>
+        <button class="btn btn-ghost" id="import-data">IMPORT</button>
+        <button class="btn btn-danger" id="wipe-data">WIPE ALL</button>
+      </div>
+      <input type="file" id="import-file" accept=".json" style="display:none" />
+    </div>
+
+    <div class="settings-card">
+      <div class="settings-title">ABOUT</div>
+      <div class="settings-desc">Nursery Ops · offline PWA · v1.0</div>
+      <div class="settings-desc" id="storage-info">—</div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ===================== MODAL ===================== -->
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div class="modal-title" id="modal-title">—</div>
+      <button class="icon-btn" id="modal-close" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

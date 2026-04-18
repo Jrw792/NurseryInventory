@@ -1,0 +1,1252 @@
+/* ==========================================================
+   NURSERY OPS
+   Offline PWA — order routing, inventory, pick runs
+   ========================================================== */
+
+/* ---------------- STORAGE ---------------- */
+const LS_KEY = 'nursery_ops_v1';
+
+function emptyState() {
+  return {
+    products: [],      // {id, name, potSize, cellId}
+    orders: [],        // {id, number, items: [{productId, qty}], createdAt}
+    run: null,         // {stops: [{cellId, picks:[{productId, qty, orderNums:[]}], machine, done}], pickedKeys: Set-like object}
+    map: defaultMap(),
+    machineRules: defaultRules(),
+    potSizes: ['4"', '1 Gal', '3 Gal', '5 Gal', '7 Gal', '15 Gal', '30 Gal', '45 Gal', 'Root Ball'],
+    history: [],       // [{id, completedAt, stopsCount, totalPicks, orderNumbers: [], snapshot}]
+    seenOnboard: false,
+  };
+}
+
+function defaultMap() {
+  // 10 cols x 8 rows, sample layout
+  // types: 'aisle' (walkable path), 'zone' (pickable area), 'entrance'
+  const cols = 10, rows = 8;
+  const cells = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      let type = 'zone';
+      let label = '';
+      // Aisles on col 0, col 5, col 9 and row 3
+      if (c === 0 || c === 5 || c === 9) type = 'aisle';
+      if (r === 3) type = 'aisle';
+      if (r === 7 && c === 0) { type = 'entrance'; label = 'IN/OUT'; }
+      if (type === 'zone') {
+        // Label by quadrant
+        const quad = (r < 3 ? 'A' : 'B') + (c < 5 ? '1' : '2');
+        label = `${quad}-${r}${c}`;
+      } else if (type === 'aisle') {
+        label = '';
+      }
+      cells.push({
+        id: `${r}_${c}`,
+        r, c,
+        type,
+        label,
+      });
+    }
+  }
+  return { cols, rows, cells };
+}
+
+function defaultRules() {
+  // Machines: "Small Ford Ranger w/ wagons" (SMALL), "Medium Chevy" (MEDIUM), "Skid Steer" (SKID)
+  return [
+    { id: 'r1', label: '30 Gal, 45 Gal, or Root Ball (any qty)', test: { potSizesIn: ['30 Gal', '45 Gal', 'Root Ball'] }, machine: 'SKID', machineLabel: 'Skid Steer' },
+    { id: 'r2', label: 'High quantity (20+) of any size up to 15 Gal', test: { qtyMin: 20, potSizesNotIn: ['30 Gal', '45 Gal', 'Root Ball'] }, machine: 'SMALL', machineLabel: 'Ford Ranger + Wagons' },
+    { id: 'r3', label: '15 Gal (any qty below 20)', test: { potSizesIn: ['15 Gal'] }, machine: 'SMALL', machineLabel: 'Ford Ranger + Wagons' },
+    { id: 'r4', label: 'Everything else (low/mid qty, up to 7 Gal)', test: { any: true }, machine: 'MEDIUM', machineLabel: 'Medium Chevrolet' },
+  ];
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return emptyState();
+    const parsed = JSON.parse(raw);
+    // Forward-compat: merge missing keys
+    const base = emptyState();
+    return { ...base, ...parsed };
+  } catch (e) {
+    console.error('loadState failed', e);
+    return emptyState();
+  }
+}
+
+function saveState() {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(state));
+  } catch (e) {
+    console.error('saveState failed', e);
+    toast('Storage full', true);
+  }
+}
+
+/* ---------------- STATE ---------------- */
+let state = loadState();
+let ui = {
+  currentView: 'run',
+  selectedCellId: null,
+  mapMode: 'view', // 'view' or 'config'
+  invSearch: '',
+  runMode: 'route', // 'route' or 'order'
+};
+
+/* ---------------- UTIL ---------------- */
+function uid(prefix = 'x') {
+  return prefix + '_' + Math.random().toString(36).slice(2, 9);
+}
+function $(sel) { return document.querySelector(sel); }
+function $$(sel) { return Array.from(document.querySelectorAll(sel)); }
+
+function toast(msg, isError = false) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.classList.remove('hidden');
+  el.style.borderColor = isError ? 'var(--danger)' : 'var(--accent)';
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => el.classList.add('hidden'), 2000);
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[c]);
+}
+
+function findCellById(id) {
+  return state.map.cells.find(c => c.id === id);
+}
+function findProductById(id) {
+  return state.products.find(p => p.id === id);
+}
+function findOrderById(id) {
+  return state.orders.find(o => o.id === id);
+}
+function getEntrance() {
+  return state.map.cells.find(c => c.type === 'entrance');
+}
+
+/* ---------------- ROUTING ---------------- */
+// Dijkstra shortest path between cells.
+// All cells are walkable (a worker CAN physically walk through any zone), but aisles
+// are "cheaper" to traverse so the route naturally prefers aisle corridors and only
+// cuts through zones when that's genuinely shorter (or the only way).
+function bfsDistance(fromCellId, toCellId) {
+  if (fromCellId === toCellId) return { dist: 0, path: [fromCellId] };
+  const from = findCellById(fromCellId);
+  const to = findCellById(toCellId);
+  if (!from || !to) return { dist: Infinity, path: [] };
+
+  const { cols, rows, cells } = state.map;
+  const cellMap = new Map(cells.map(c => [c.id, c]));
+  // Cost to step INTO a cell. Aisles and entrance are the "roads"; zones are passable but penalized.
+  const costOf = (c) => {
+    if (!c) return Infinity;
+    if (c.type === 'aisle' || c.type === 'entrance') return 1;
+    return 3; // zone — walkable but discouraged
+  };
+
+  // Simple array-based priority queue (small graphs, fine for a nursery)
+  const dist = new Map();
+  const prev = new Map();
+  dist.set(from.id, 0);
+  const pq = [{ id: from.id, r: from.r, c: from.c, d: 0 }];
+  const dirs = [[-1,0],[1,0],[0,-1],[0,1]];
+
+  while (pq.length) {
+    // Extract min
+    let mi = 0;
+    for (let i = 1; i < pq.length; i++) if (pq[i].d < pq[mi].d) mi = i;
+    const cur = pq.splice(mi, 1)[0];
+    if (cur.id === to.id) break;
+    if (cur.d > (dist.get(cur.id) ?? Infinity)) continue;
+
+    for (const [dr, dc] of dirs) {
+      const nr = cur.r + dr, nc = cur.c + dc;
+      if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
+      const nid = `${nr}_${nc}`;
+      const nCell = cellMap.get(nid);
+      if (!nCell) continue;
+      const step = costOf(nCell);
+      if (step === Infinity) continue;
+      const nd = cur.d + step;
+      if (nd < (dist.get(nid) ?? Infinity)) {
+        dist.set(nid, nd);
+        prev.set(nid, cur.id);
+        pq.push({ id: nid, r: nr, c: nc, d: nd });
+      }
+    }
+  }
+
+  if (!dist.has(to.id)) return { dist: Infinity, path: [] };
+  // Reconstruct path
+  const path = [to.id];
+  let p = prev.get(to.id);
+  while (p) { path.unshift(p); p = prev.get(p); }
+  return { dist: dist.get(to.id), path };
+}
+
+/* ---------------- MACHINE SELECTION ---------------- */
+function pickMachineForPick(pick) {
+  const product = findProductById(pick.productId);
+  if (!product) return { machine: 'MEDIUM', machineLabel: 'Medium Chevrolet' };
+  for (const rule of state.machineRules) {
+    if (ruleMatches(rule, product, pick.qty)) {
+      return { machine: rule.machine, machineLabel: rule.machineLabel };
+    }
+  }
+  return { machine: 'MEDIUM', machineLabel: 'Medium Chevrolet' };
+}
+
+function ruleMatches(rule, product, qty) {
+  const t = rule.test || {};
+  if (t.any) return true;
+  if (t.potSizesIn && !t.potSizesIn.includes(product.potSize)) return false;
+  if (t.potSizesNotIn && t.potSizesNotIn.includes(product.potSize)) return false;
+  if (t.qtyMin != null && qty < t.qtyMin) return false;
+  if (t.qtyMax != null && qty > t.qtyMax) return false;
+  return true;
+}
+
+// Stop-level machine = the heaviest requirement of any pick at that stop.
+// Precedence: SKID > SMALL > MEDIUM
+function stopMachine(stop) {
+  const rank = { SKID: 3, SMALL: 2, MEDIUM: 1 };
+  let best = { machine: 'MEDIUM', machineLabel: 'Medium Chevrolet' };
+  for (const pick of stop.picks) {
+    const m = pickMachineForPick(pick);
+    if (rank[m.machine] > rank[best.machine]) best = m;
+  }
+  return best;
+}
+
+/* ---------------- BUILD RUN ---------------- */
+function buildRun() {
+  const entrance = getEntrance();
+  if (!entrance) {
+    toast('Set an entrance on the map first', true);
+    return null;
+  }
+  if (state.orders.length === 0) {
+    toast('Add orders first', true);
+    return null;
+  }
+
+  // Aggregate all items across orders by productId, keeping order numbers
+  const byProduct = new Map();
+  for (const order of state.orders) {
+    for (const item of order.items) {
+      if (!byProduct.has(item.productId)) {
+        byProduct.set(item.productId, { productId: item.productId, qty: 0, orderNums: [] });
+      }
+      const agg = byProduct.get(item.productId);
+      agg.qty += item.qty;
+      const count = order.items.filter(i => i.productId === item.productId).reduce((a, b) => a + b.qty, 0);
+      // track per-order breakdown for staging
+      const existing = agg.orderNums.find(o => o.number === order.number);
+      if (existing) existing.qty += item.qty;
+      else agg.orderNums.push({ number: order.number, qty: item.qty });
+    }
+  }
+
+  // Group picks by location cellId
+  const byCell = new Map();
+  const unplaced = [];
+  for (const [pid, pick] of byProduct.entries()) {
+    const product = findProductById(pid);
+    if (!product || !product.cellId) {
+      unplaced.push(pick);
+      continue;
+    }
+    if (!byCell.has(product.cellId)) byCell.set(product.cellId, { cellId: product.cellId, picks: [] });
+    byCell.get(product.cellId).picks.push(pick);
+  }
+
+  if (byCell.size === 0 && unplaced.length > 0) {
+    toast('No products are placed on the map', true);
+    return null;
+  }
+
+  // Greedy nearest-neighbor tour from entrance, back to entrance
+  const stops = [...byCell.values()];
+  const ordered = [];
+  let current = entrance.id;
+  const remaining = new Set(stops.map((_, i) => i));
+  while (remaining.size > 0) {
+    let bestIdx = -1;
+    let bestDist = Infinity;
+    for (const i of remaining) {
+      const d = bfsDistance(current, stops[i].cellId).dist;
+      if (d < bestDist) { bestDist = d; bestIdx = i; }
+    }
+    if (bestIdx === -1) {
+      // Remaining stops are unreachable from current — append them at the end in arbitrary order
+      for (const i of remaining) ordered.push(stops[i]);
+      break;
+    }
+    ordered.push(stops[bestIdx]);
+    remaining.delete(bestIdx);
+    current = stops[bestIdx].cellId;
+  }
+
+  // Attach machine to each stop, mark done:false
+  for (const stop of ordered) {
+    const m = stopMachine(stop);
+    stop.machine = m.machine;
+    stop.machineLabel = m.machineLabel;
+    stop.done = false;
+    // compute label for display
+    const cell = findCellById(stop.cellId);
+    stop.label = cell ? cell.label : stop.cellId;
+    // init picked flags
+    stop.picks.forEach(p => { p.picked = false; });
+  }
+
+  const run = {
+    stops: ordered,
+    unplaced,
+    createdAt: Date.now(),
+  };
+  return run;
+}
+
+/* ---------------- VIEW SWITCHING ---------------- */
+function setView(view) {
+  ui.currentView = view;
+  $$('.view').forEach(v => v.classList.toggle('active', v.dataset.view === view));
+  $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === view));
+  render();
+}
+
+/* ---------------- RENDER ---------------- */
+function render() {
+  switch (ui.currentView) {
+    case 'run': renderRun(); break;
+    case 'orders': renderOrders(); break;
+    case 'history': renderHistory(); break;
+    case 'inventory': renderInventory(); break;
+    case 'map': renderMap(); break;
+    case 'settings': renderSettings(); break;
+  }
+  saveState();
+}
+
+/* ---------- RUN RENDER ---------- */
+function renderRun() {
+  const run = state.run;
+  const empty = $('#run-empty');
+  const active = $('#run-active');
+  const stats = $('#run-stats');
+
+  if (!run || !run.stops || run.stops.length === 0) {
+    empty.classList.remove('hidden');
+    active.classList.add('hidden');
+    stats.textContent = state.orders.length
+      ? `${state.orders.length} order${state.orders.length !== 1 ? 's' : ''} pending`
+      : 'No active run';
+    return;
+  }
+
+  empty.classList.add('hidden');
+  active.classList.remove('hidden');
+
+  const totalPicks = run.stops.reduce((a, s) => a + s.picks.length, 0);
+  const donePicks = run.stops.reduce((a, s) => a + s.picks.filter(p => p.picked).length, 0);
+  stats.textContent = `${run.stops.length} stops · ${donePicks}/${totalPicks} picked`;
+
+  // Update mode toggle state
+  $$('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === ui.runMode));
+
+  const list = $('#stops-list');
+  list.innerHTML = '';
+
+  if (ui.runMode === 'route') {
+    renderRunByRoute(list, run);
+  } else {
+    renderRunByOrder(list, run);
+  }
+
+  // unplaced warning
+  if (run.unplaced && run.unplaced.length > 0) {
+    const warn = document.createElement('div');
+    warn.style.cssText = 'background: var(--bg-card); border: 1px solid var(--warn); color: var(--warn); padding: 12px 14px; border-radius: var(--r-md); font-size: 13px; font-family: var(--font-display); margin-top: 10px;';
+    const names = run.unplaced
+      .map(p => {
+        const prod = findProductById(p.productId);
+        return prod ? prod.name : '?';
+      })
+      .join(', ');
+    warn.innerHTML = `⚠ NOT ON MAP: ${escapeHtml(names)}<br><span style="color:var(--ink-dim); font-family:var(--font-body)">Assign locations in Inventory to include these.</span>`;
+    list.appendChild(warn);
+  }
+
+  // bind pick toggles (works for both modes — data attributes store stop+pick indices)
+  list.querySelectorAll('.pick-check').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const sIdx = +btn.dataset.stop;
+      const pIdx = +btn.dataset.pick;
+      const pick = state.run.stops[sIdx].picks[pIdx];
+      pick.picked = !pick.picked;
+      renderRun();
+    });
+  });
+}
+
+function renderRunByRoute(list, run) {
+  run.stops.forEach((stop, idx) => {
+    const allPicked = stop.picks.every(p => p.picked);
+    const machineClass =
+      stop.machine === 'SKID' ? 'skid' :
+      stop.machine === 'SMALL' ? 'small' :
+      'medium';
+
+    const card = document.createElement('div');
+    card.className = 'stop-card' + (allPicked ? ' done' : '');
+    card.innerHTML = `
+      <div class="stop-head">
+        <div class="stop-num">${idx + 1}</div>
+        <div>
+          <div class="stop-loc">${escapeHtml(stop.label)}</div>
+          <div class="stop-meta">${stop.picks.length} product${stop.picks.length !== 1 ? 's' : ''}</div>
+        </div>
+        <div class="stop-machine ${machineClass}">${escapeHtml(stop.machineLabel)}</div>
+      </div>
+      <div class="stop-picks"></div>
+    `;
+    const picksBox = card.querySelector('.stop-picks');
+    stop.picks.forEach((pick, pIdx) => {
+      const product = findProductById(pick.productId);
+      const row = document.createElement('div');
+      row.className = 'pick-row' + (pick.picked ? ' picked' : '');
+      const orderBreakdown = pick.orderNums.map(o =>
+        `<span class="order-tag">#${escapeHtml(o.number)} ×${o.qty}</span>`
+      ).join('');
+      row.innerHTML = `
+        <button class="pick-check ${pick.picked ? 'checked' : ''}" data-stop="${idx}" data-pick="${pIdx}">${pick.picked ? '✓' : ''}</button>
+        <div class="pick-text">
+          <div><span class="pick-product">${escapeHtml(product ? product.name : '?')}</span> — <span class="pick-qty">${pick.qty}</span> × ${escapeHtml(product ? product.potSize : '?')}</div>
+          <div class="pick-orders">${orderBreakdown}</div>
+        </div>
+      `;
+      picksBox.appendChild(row);
+    });
+    list.appendChild(card);
+  });
+}
+
+function renderRunByOrder(list, run) {
+  // Group picks by original order number. Note: one pick may belong to multiple orders (aggregated),
+  // so we re-split it per-order for staging clarity.
+  const byOrder = new Map(); // orderNumber -> [{stopIdx, pickIdx, qty, productId, location, machine}]
+  run.stops.forEach((stop, sIdx) => {
+    stop.picks.forEach((pick, pIdx) => {
+      pick.orderNums.forEach(on => {
+        if (!byOrder.has(on.number)) byOrder.set(on.number, []);
+        byOrder.get(on.number).push({
+          stopIdx: sIdx, pickIdx: pIdx,
+          qty: on.qty, productId: pick.productId,
+          location: stop.label, machine: stop.machineLabel,
+          machineClass: stop.machine === 'SKID' ? 'skid' : stop.machine === 'SMALL' ? 'small' : 'medium',
+          picked: pick.picked,
+        });
+      });
+    });
+  });
+
+  // Preserve natural order-number order
+  const orderNums = Array.from(byOrder.keys()).sort();
+  orderNums.forEach(num => {
+    const rows = byOrder.get(num);
+    const allPicked = rows.every(r => r.picked);
+    const picked = rows.filter(r => r.picked).length;
+
+    const card = document.createElement('div');
+    card.className = 'stop-card' + (allPicked ? ' done' : '');
+    card.innerHTML = `
+      <div class="order-group-head">
+        <div class="stop-num">#</div>
+        <div class="order-group-num">ORDER #${escapeHtml(num)}</div>
+        <div class="order-group-progress">${picked}/${rows.length}</div>
+      </div>
+      <div class="stop-picks"></div>
+    `;
+    const picksBox = card.querySelector('.stop-picks');
+    rows.forEach(r => {
+      const product = findProductById(r.productId);
+      const row = document.createElement('div');
+      row.className = 'pick-row' + (r.picked ? ' picked' : '');
+      row.innerHTML = `
+        <button class="pick-check ${r.picked ? 'checked' : ''}" data-stop="${r.stopIdx}" data-pick="${r.pickIdx}">${r.picked ? '✓' : ''}</button>
+        <div class="pick-text">
+          <div><span class="pick-product">${escapeHtml(product ? product.name : '?')}</span> — <span class="pick-qty">${r.qty}</span> × ${escapeHtml(product ? product.potSize : '?')}</div>
+          <div class="pick-detail">◉ ${escapeHtml(r.location)} · <span style="color:var(--accent)">${escapeHtml(r.machine)}</span></div>
+        </div>
+      `;
+      picksBox.appendChild(row);
+    });
+    list.appendChild(card);
+  });
+}
+
+/* ---------- ORDERS RENDER ---------- */
+function renderOrders() {
+  const list = $('#orders-list');
+  list.innerHTML = '';
+  if (state.orders.length === 0) {
+    list.innerHTML = `<div class="empty-state" style="padding: 30px 16px;">
+      <div class="empty-icon">◱</div>
+      <div class="empty-title">No orders yet</div>
+      <div class="empty-sub">Paste rows above or tap + ORDER.</div>
+    </div>`;
+    return;
+  }
+  state.orders.forEach(order => {
+    const card = document.createElement('div');
+    card.className = 'order-card';
+    const totalQty = order.items.reduce((a, i) => a + i.qty, 0);
+    card.innerHTML = `
+      <div class="order-head">
+        <div class="order-num">ORDER #${escapeHtml(order.number)}</div>
+        <div class="order-count">${order.items.length} items · ${totalQty} units</div>
+      </div>
+      <div class="order-items"></div>
+      <div class="order-actions">
+        <button class="btn btn-ghost btn-small" data-act="edit" data-id="${order.id}">EDIT</button>
+        <button class="btn btn-danger btn-small" data-act="del" data-id="${order.id}">DELETE</button>
+      </div>
+    `;
+    const itemsBox = card.querySelector('.order-items');
+    order.items.forEach(it => {
+      const p = findProductById(it.productId);
+      const row = document.createElement('div');
+      row.className = 'order-item-row';
+      row.innerHTML = `
+        <div class="order-item-name">${escapeHtml(p ? p.name : '(missing product)')} <span style="color:var(--ink-faint); font-size:12px">${escapeHtml(p ? p.potSize : '')}</span></div>
+        <div class="order-item-qty">× ${it.qty}</div>
+      `;
+      itemsBox.appendChild(row);
+    });
+    list.appendChild(card);
+  });
+
+  list.querySelectorAll('button[data-act]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.id;
+      if (btn.dataset.act === 'del') {
+        if (confirm('Delete this order?')) {
+          state.orders = state.orders.filter(o => o.id !== id);
+          renderOrders();
+        }
+      } else if (btn.dataset.act === 'edit') {
+        openOrderModal(id);
+      }
+    });
+  });
+}
+
+/* ---------- INVENTORY RENDER ---------- */
+function renderInventory() {
+  const list = $('#inventory-list');
+  list.innerHTML = '';
+  const q = ui.invSearch.trim().toLowerCase();
+  let items = state.products;
+  if (q) items = items.filter(p => p.name.toLowerCase().includes(q) || (p.potSize || '').toLowerCase().includes(q));
+
+  if (items.length === 0) {
+    list.innerHTML = `<div class="empty-state" style="padding: 30px 16px;">
+      <div class="empty-icon">◲</div>
+      <div class="empty-title">${state.products.length === 0 ? 'No products yet' : 'No matches'}</div>
+      <div class="empty-sub">${state.products.length === 0 ? 'Tap + PRODUCT to add your first item.' : 'Try a different search.'}</div>
+    </div>`;
+    return;
+  }
+
+  items.forEach(p => {
+    const cell = p.cellId ? findCellById(p.cellId) : null;
+    const card = document.createElement('div');
+    card.className = 'product-card';
+    card.innerHTML = `
+      <div class="product-info">
+        <div class="product-name">${escapeHtml(p.name)}</div>
+        <div class="product-loc ${!cell ? 'unassigned' : ''}">${cell ? '◉ ' + escapeHtml(cell.label) : '◌ UNASSIGNED'}</div>
+      </div>
+      <div class="product-pot">${escapeHtml(p.potSize || '?')}</div>
+      <button class="icon-btn" data-edit="${p.id}" style="width:36px; height:36px; font-size:14px;">✎</button>
+    `;
+    list.appendChild(card);
+  });
+
+  list.querySelectorAll('button[data-edit]').forEach(btn => {
+    btn.addEventListener('click', () => openProductModal(btn.dataset.edit));
+  });
+}
+
+/* ---------- MAP RENDER ---------- */
+function renderMap() {
+  const grid = $('#facility-map');
+  const { cols, rows, cells } = state.map;
+  grid.style.gridTemplateColumns = `repeat(${cols}, minmax(42px, 1fr))`;
+  grid.innerHTML = '';
+
+  // count products per zone
+  const countByCell = new Map();
+  for (const p of state.products) {
+    if (!p.cellId) continue;
+    countByCell.set(p.cellId, (countByCell.get(p.cellId) || 0) + 1);
+  }
+
+  cells.forEach(cell => {
+    const div = document.createElement('div');
+    div.className = 'map-cell ' + cell.type;
+    if (cell.id === ui.selectedCellId) div.classList.add('selected');
+    const n = countByCell.get(cell.id) || 0;
+    if (cell.type === 'zone' && n > 0) div.classList.add('has-products');
+    div.innerHTML = `
+      <span>${escapeHtml(cell.label || '')}</span>
+      ${n > 0 ? `<span class="cell-count">${n}</span>` : ''}
+    `;
+    div.addEventListener('click', () => onMapCellTap(cell.id));
+    grid.appendChild(div);
+  });
+
+  renderMapInfo();
+}
+
+function renderMapInfo() {
+  const box = $('#map-info');
+  if (!ui.selectedCellId) {
+    box.innerHTML = ui.mapMode === 'config'
+      ? '<strong>CONFIG MODE</strong> · Tap a cell to change its type. Tap again to cycle: zone → aisle → entrance → zone.'
+      : 'Tap a cell to view its contents.';
+    return;
+  }
+  const cell = findCellById(ui.selectedCellId);
+  if (!cell) { box.textContent = ''; return; }
+  if (cell.type === 'entrance') {
+    box.innerHTML = `<strong>${escapeHtml(cell.label || 'ENTRANCE')}</strong> · Route starts and ends here.`;
+    return;
+  }
+  if (cell.type === 'aisle') {
+    box.innerHTML = `<strong>Aisle</strong> · walkable path (${cell.id})`;
+    return;
+  }
+  // zone
+  const products = state.products.filter(p => p.cellId === cell.id);
+  if (products.length === 0) {
+    box.innerHTML = `<strong>${escapeHtml(cell.label)}</strong> · empty · <em style="color:var(--ink-dim)">Assign products in Inventory.</em>`;
+    return;
+  }
+  box.innerHTML = `<strong>${escapeHtml(cell.label)}</strong> · ${products.length} product${products.length !== 1 ? 's' : ''}<br>` +
+    products.map(p => `<span style="color:var(--ink-dim); font-size:12px">• ${escapeHtml(p.name)} <span style="color:var(--ink-faint)">(${escapeHtml(p.potSize || '?')})</span></span>`).join('<br>');
+}
+
+function onMapCellTap(cellId) {
+  if (ui.mapMode === 'config') {
+    // cycle type
+    const cell = findCellById(cellId);
+    if (!cell) return;
+    const currentEntrance = getEntrance();
+    if (cell.type === 'zone') {
+      cell.type = 'aisle';
+      cell.label = '';
+    } else if (cell.type === 'aisle') {
+      // only one entrance — remove existing first
+      if (currentEntrance && currentEntrance.id !== cell.id) currentEntrance.type = 'aisle';
+      cell.type = 'entrance';
+      cell.label = 'IN/OUT';
+    } else if (cell.type === 'entrance') {
+      cell.type = 'zone';
+      // relabel
+      const quad = (cell.r < Math.ceil(state.map.rows / 2) ? 'A' : 'B') + (cell.c < Math.ceil(state.map.cols / 2) ? '1' : '2');
+      cell.label = `${quad}-${cell.r}${cell.c}`;
+    }
+    renderMap();
+    return;
+  }
+  ui.selectedCellId = cellId;
+  renderMap();
+}
+
+/* ---------- SETTINGS RENDER ---------- */
+function renderSettings() {
+  const box = $('#machine-rules');
+  box.innerHTML = '';
+  state.machineRules.forEach(r => {
+    const row = document.createElement('div');
+    row.className = 'rule-row';
+    row.innerHTML = `
+      <div class="rule-label">${escapeHtml(r.label)}</div>
+      <div class="rule-machine">→ ${escapeHtml(r.machineLabel)}</div>
+    `;
+    box.appendChild(row);
+  });
+
+  const chips = $('#pot-sizes-list');
+  chips.innerHTML = '';
+  state.potSizes.forEach(p => {
+    const chip = document.createElement('div');
+    chip.className = 'chip';
+    chip.textContent = p;
+    chips.appendChild(chip);
+  });
+
+  // storage info
+  try {
+    const bytes = new Blob([JSON.stringify(state)]).size;
+    const kb = (bytes / 1024).toFixed(1);
+    $('#storage-info').textContent = `Local data · ${kb} KB · ${state.products.length} products · ${state.orders.length} orders`;
+  } catch (e) {}
+}
+
+/* ---------------- MODALS ---------------- */
+function openModal(title, bodyHTML) {
+  $('#modal-title').textContent = title;
+  $('#modal-body').innerHTML = bodyHTML;
+  $('#modal').classList.remove('hidden');
+}
+function closeModal() {
+  $('#modal').classList.add('hidden');
+  $('#modal-body').innerHTML = '';
+}
+
+function openProductModal(productId) {
+  const isNew = !productId;
+  const p = isNew ? { name: '', potSize: state.potSizes[0], cellId: '' } : findProductById(productId);
+  if (!isNew && !p) return;
+
+  const zones = state.map.cells.filter(c => c.type === 'zone');
+  const html = `
+    <div class="form-field">
+      <label class="form-label">Product name</label>
+      <input type="text" class="form-input" id="prod-name" value="${escapeHtml(p.name)}" placeholder="Japanese Maple" />
+    </div>
+    <div class="form-row">
+      <div class="form-field">
+        <label class="form-label">Pot size</label>
+        <select class="form-select" id="prod-pot">
+          ${state.potSizes.map(s => `<option ${s === p.potSize ? 'selected' : ''}>${escapeHtml(s)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-field">
+        <label class="form-label">Location</label>
+        <select class="form-select" id="prod-loc">
+          <option value="">— Unassigned —</option>
+          ${zones.map(z => `<option value="${z.id}" ${z.id === p.cellId ? 'selected' : ''}>${escapeHtml(z.label)}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="button-row" style="margin-top: 14px;">
+      <button class="btn btn-primary" id="prod-save" style="flex:1">${isNew ? 'ADD' : 'SAVE'}</button>
+      ${!isNew ? `<button class="btn btn-danger" id="prod-del">DELETE</button>` : ''}
+    </div>
+  `;
+  openModal(isNew ? 'New Product' : 'Edit Product', html);
+
+  $('#prod-save').addEventListener('click', () => {
+    const name = $('#prod-name').value.trim();
+    const potSize = $('#prod-pot').value;
+    const cellId = $('#prod-loc').value || null;
+    if (!name) { toast('Name required', true); return; }
+    if (isNew) {
+      state.products.push({ id: uid('p'), name, potSize, cellId });
+      toast('Added');
+    } else {
+      p.name = name; p.potSize = potSize; p.cellId = cellId;
+      toast('Saved');
+    }
+    closeModal();
+    render();
+  });
+  if (!isNew) {
+    $('#prod-del').addEventListener('click', () => {
+      if (!confirm('Delete this product? It will be removed from any orders.')) return;
+      state.products = state.products.filter(x => x.id !== productId);
+      // Scrub from orders
+      state.orders.forEach(o => {
+        o.items = o.items.filter(i => i.productId !== productId);
+      });
+      state.orders = state.orders.filter(o => o.items.length > 0);
+      closeModal();
+      render();
+    });
+  }
+}
+
+function openOrderModal(orderId) {
+  const isNew = !orderId;
+  const order = isNew
+    ? { id: uid('o'), number: '', items: [], createdAt: Date.now() }
+    : JSON.parse(JSON.stringify(findOrderById(orderId)));
+  if (!isNew && !order) return;
+
+  const html = `
+    <div class="form-field">
+      <label class="form-label">Order number</label>
+      <input type="text" class="form-input" id="ord-num" value="${escapeHtml(order.number)}" placeholder="1001" />
+    </div>
+    <div class="form-field">
+      <label class="form-label">Line items</label>
+      <div id="line-items"></div>
+      <button class="btn btn-ghost btn-small" id="add-line" style="margin-top: 8px;">+ LINE</button>
+    </div>
+    <div class="button-row" style="margin-top: 14px;">
+      <button class="btn btn-primary" id="ord-save" style="flex:1">${isNew ? 'CREATE ORDER' : 'SAVE'}</button>
+      ${!isNew ? `<button class="btn btn-danger" id="ord-del">DELETE</button>` : ''}
+    </div>
+  `;
+  openModal(isNew ? 'New Order' : 'Edit Order', html);
+
+  const linesBox = $('#line-items');
+  function renderLines() {
+    linesBox.innerHTML = '';
+    order.items.forEach((it, i) => {
+      const row = document.createElement('div');
+      row.className = 'line-item';
+      const opts = state.products.map(p =>
+        `<option value="${p.id}" ${p.id === it.productId ? 'selected' : ''}>${escapeHtml(p.name)} (${escapeHtml(p.potSize)})</option>`
+      ).join('');
+      row.innerHTML = `
+        <select class="form-select line-prod"><option value="">Select...</option>${opts}</select>
+        <input type="number" class="form-input line-qty" min="1" value="${it.qty || 1}" />
+        <div style="font-size:11px; color:var(--ink-dim); font-family: var(--font-display);">${escapeHtml(findProductById(it.productId)?.potSize || '')}</div>
+        <button class="line-remove">×</button>
+      `;
+      row.querySelector('.line-prod').addEventListener('change', e => {
+        it.productId = e.target.value;
+        renderLines();
+      });
+      row.querySelector('.line-qty').addEventListener('input', e => {
+        it.qty = Math.max(1, parseInt(e.target.value) || 1);
+      });
+      row.querySelector('.line-remove').addEventListener('click', () => {
+        order.items.splice(i, 1);
+        renderLines();
+      });
+      linesBox.appendChild(row);
+    });
+    if (order.items.length === 0) {
+      linesBox.innerHTML = '<div style="color:var(--ink-faint); font-size:13px; padding: 8px 0;">No items yet. Tap + LINE.</div>';
+    }
+  }
+  renderLines();
+
+  $('#add-line').addEventListener('click', () => {
+    order.items.push({ productId: '', qty: 1 });
+    renderLines();
+  });
+
+  $('#ord-save').addEventListener('click', () => {
+    const num = $('#ord-num').value.trim();
+    if (!num) { toast('Order number required', true); return; }
+    const clean = order.items.filter(i => i.productId && i.qty > 0);
+    if (clean.length === 0) { toast('Add at least one item', true); return; }
+    order.items = clean;
+    order.number = num;
+    if (isNew) {
+      state.orders.push(order);
+      toast('Order created');
+    } else {
+      const idx = state.orders.findIndex(o => o.id === orderId);
+      if (idx >= 0) state.orders[idx] = order;
+      toast('Saved');
+    }
+    closeModal();
+    render();
+  });
+  if (!isNew) {
+    $('#ord-del').addEventListener('click', () => {
+      if (!confirm('Delete this order?')) return;
+      state.orders = state.orders.filter(o => o.id !== orderId);
+      closeModal();
+      render();
+    });
+  }
+}
+
+/* ---------------- BULK IMPORT ---------------- */
+function handleBulkImport() {
+  const text = $('#bulk-input').value.trim();
+  if (!text) { toast('Paste some rows first', true); return; }
+
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const ordersByNum = new Map();
+  // Seed with existing orders so pastes merge into them
+  for (const o of state.orders) ordersByNum.set(o.number, o);
+
+  let created = 0, added = 0, skipped = 0;
+  for (const line of lines) {
+    const parts = line.split(',').map(s => s.trim());
+    if (parts.length < 4) { skipped++; continue; }
+    const [orderNum, prodName, qtyStr, potSize] = parts;
+    const qty = parseInt(qtyStr);
+    if (!orderNum || !prodName || !qty || qty < 1) { skipped++; continue; }
+
+    // Find or create product
+    let product = state.products.find(p =>
+      p.name.toLowerCase() === prodName.toLowerCase() &&
+      (p.potSize || '').toLowerCase() === potSize.toLowerCase()
+    );
+    if (!product) {
+      // match pot size from list (case insensitive)
+      const matchedPot = state.potSizes.find(s => s.toLowerCase() === potSize.toLowerCase()) || potSize;
+      product = { id: uid('p'), name: prodName, potSize: matchedPot, cellId: null };
+      state.products.push(product);
+    }
+
+    // Find or create order
+    let order = ordersByNum.get(orderNum);
+    if (!order) {
+      order = { id: uid('o'), number: orderNum, items: [], createdAt: Date.now() };
+      state.orders.push(order);
+      ordersByNum.set(orderNum, order);
+      created++;
+    }
+    order.items.push({ productId: product.id, qty });
+    added++;
+  }
+
+  $('#bulk-input').value = '';
+  toast(`${added} item${added !== 1 ? 's' : ''} added · ${created} new order${created !== 1 ? 's' : ''}${skipped ? ` · ${skipped} skipped` : ''}`);
+  render();
+}
+
+/* ---------------- RUN CONTROL ---------------- */
+function startBuildRoute() {
+  const run = buildRun();
+  if (!run) return;
+  state.run = run;
+  setView('run');
+  toast(`Route built · ${run.stops.length} stops`);
+}
+
+function resetRun() {
+  if (!confirm('Reset the current run? Picked progress will be cleared.')) return;
+  state.run = null;
+  render();
+}
+
+function completeRun() {
+  const run = state.run;
+  if (!run) return;
+  const totalPicks = run.stops.reduce((a, s) => a + s.picks.length, 0);
+  const donePicks = run.stops.reduce((a, s) => a + s.picks.filter(p => p.picked).length, 0);
+
+  let msg;
+  if (donePicks < totalPicks) {
+    msg = `Only ${donePicks}/${totalPicks} picks done. Complete anyway? Incomplete picks will be archived as-is and the current orders cleared.`;
+  } else {
+    msg = `Complete this run? It will be archived to History and orders will be cleared.`;
+  }
+  if (!confirm(msg)) return;
+
+  // Build a snapshot we can reconstruct a report from
+  const orderNumbersSet = new Set();
+  run.stops.forEach(s => s.picks.forEach(p => p.orderNums.forEach(o => orderNumbersSet.add(o.number))));
+
+  // Deep-copy stops with product names resolved at time of completion (names may change later)
+  const snapshot = run.stops.map(s => ({
+    label: s.label,
+    cellId: s.cellId,
+    machine: s.machine,
+    machineLabel: s.machineLabel,
+    picks: s.picks.map(p => {
+      const prod = findProductById(p.productId);
+      return {
+        productId: p.productId,
+        productName: prod ? prod.name : '(deleted)',
+        potSize: prod ? prod.potSize : '?',
+        qty: p.qty,
+        picked: !!p.picked,
+        orderNums: p.orderNums.map(o => ({ ...o })),
+      };
+    }),
+  }));
+
+  const record = {
+    id: uid('h'),
+    completedAt: Date.now(),
+    stopsCount: run.stops.length,
+    totalPicks,
+    donePicks,
+    orderNumbers: Array.from(orderNumbersSet).sort(),
+    snapshot,
+  };
+  state.history = state.history || [];
+  state.history.unshift(record);
+  // Cap history to 200 entries to keep storage lean
+  if (state.history.length > 200) state.history.length = 200;
+
+  // Clear current run + orders (history has a copy)
+  state.run = null;
+  state.orders = [];
+  toast(`Archived · ${donePicks}/${totalPicks} picks`);
+  render();
+}
+
+function renderHistory() {
+  const list = $('#history-list');
+  list.innerHTML = '';
+  const history = state.history || [];
+  if (history.length === 0) {
+    list.innerHTML = `<div class="empty-state" style="padding: 30px 16px;">
+      <div class="empty-icon">◳</div>
+      <div class="empty-title">No runs yet</div>
+      <div class="empty-sub">Completed runs will appear here.</div>
+    </div>`;
+    return;
+  }
+  history.forEach(h => {
+    const d = new Date(h.completedAt);
+    const dateStr = d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const card = document.createElement('div');
+    card.className = 'history-card';
+    card.innerHTML = `
+      <div class="history-date">${escapeHtml(dateStr)}</div>
+      <div class="history-sub">${h.stopsCount} stops · ${h.donePicks}/${h.totalPicks} picks · ${h.orderNumbers.length} order${h.orderNumbers.length !== 1 ? 's' : ''}</div>
+      <div class="history-orders">Orders: ${h.orderNumbers.map(n => '#' + escapeHtml(n)).join(', ') || '—'}</div>
+      <div class="order-actions">
+        <button class="btn btn-ghost btn-small" data-hist-view="${h.id}">VIEW</button>
+        <button class="btn btn-ghost btn-small" data-hist-csv="${h.id}">CSV</button>
+        <button class="btn btn-danger btn-small" data-hist-del="${h.id}">DELETE</button>
+      </div>
+    `;
+    list.appendChild(card);
+  });
+
+  list.querySelectorAll('[data-hist-view]').forEach(btn =>
+    btn.addEventListener('click', () => openHistoryDetail(btn.dataset.histView)));
+  list.querySelectorAll('[data-hist-csv]').forEach(btn =>
+    btn.addEventListener('click', () => exportRunCSV(btn.dataset.histCsv)));
+  list.querySelectorAll('[data-hist-del]').forEach(btn =>
+    btn.addEventListener('click', () => {
+      if (!confirm('Delete this run from history?')) return;
+      state.history = state.history.filter(h => h.id !== btn.dataset.histDel);
+      renderHistory();
+      saveState();
+    }));
+}
+
+function openHistoryDetail(id) {
+  const h = (state.history || []).find(x => x.id === id);
+  if (!h) return;
+  const d = new Date(h.completedAt);
+  let body = `<div style="color:var(--ink-dim); font-size:13px; margin-bottom:12px;">
+    ${escapeHtml(d.toLocaleString())} · ${h.donePicks}/${h.totalPicks} picks
+  </div>`;
+  h.snapshot.forEach((stop, i) => {
+    body += `<div style="background:var(--bg-card); border:1px solid var(--border); border-radius:var(--r-md); padding:10px; margin-bottom:8px;">
+      <div style="font-family:var(--font-display); font-weight:700; font-size:13px;">${i + 1}. ${escapeHtml(stop.label)} <span style="float:right; color:var(--accent); font-size:11px;">${escapeHtml(stop.machineLabel)}</span></div>
+      <div style="font-size:12px; color:var(--ink-dim); margin-top:6px;">`;
+    stop.picks.forEach(p => {
+      body += `<div style="padding:3px 0;">${p.picked ? '✓' : '◌'} ${escapeHtml(p.productName)} (${escapeHtml(p.potSize)}) × ${p.qty}</div>`;
+    });
+    body += `</div></div>`;
+  });
+  openModal(`RUN · ${d.toLocaleDateString()}`, body);
+}
+
+function exportRunCSV(id) {
+  const h = (state.history || []).find(x => x.id === id);
+  if (!h) return;
+  const rows = [['Stop', 'Location', 'Machine', 'Product', 'Pot Size', 'Qty', 'Orders', 'Picked']];
+  h.snapshot.forEach((stop, i) => {
+    stop.picks.forEach(p => {
+      const orderTags = p.orderNums.map(o => `#${o.number}×${o.qty}`).join('; ');
+      rows.push([
+        i + 1,
+        stop.label,
+        stop.machineLabel,
+        p.productName,
+        p.potSize,
+        p.qty,
+        orderTags,
+        p.picked ? 'yes' : 'no',
+      ]);
+    });
+  });
+  downloadCSV(rows, `run-${new Date(h.completedAt).toISOString().slice(0,10)}.csv`);
+}
+
+function exportAllHistoryCSV() {
+  const history = state.history || [];
+  if (history.length === 0) { toast('No history to export', true); return; }
+  const rows = [['Run Date', 'Stop', 'Location', 'Machine', 'Product', 'Pot Size', 'Qty', 'Orders', 'Picked']];
+  history.forEach(h => {
+    const dateStr = new Date(h.completedAt).toISOString();
+    h.snapshot.forEach((stop, i) => {
+      stop.picks.forEach(p => {
+        const orderTags = p.orderNums.map(o => `#${o.number}×${o.qty}`).join('; ');
+        rows.push([
+          dateStr,
+          i + 1,
+          stop.label,
+          stop.machineLabel,
+          p.productName,
+          p.potSize,
+          p.qty,
+          orderTags,
+          p.picked ? 'yes' : 'no',
+        ]);
+      });
+    });
+  });
+  downloadCSV(rows, `nursery-history-${new Date().toISOString().slice(0,10)}.csv`);
+}
+
+function downloadCSV(rows, filename) {
+  const csv = rows.map(r => r.map(cell => {
+    const s = String(cell ?? '');
+    if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  }).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('CSV exported');
+}
+
+/* ---------------- IMPORT/EXPORT ---------------- */
+function exportData() {
+  const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `nursery-ops-${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('Exported');
+}
+
+function importData() {
+  $('#import-file').click();
+}
+
+function handleImportFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const incoming = JSON.parse(ev.target.result);
+      if (!incoming.products || !incoming.map) throw new Error('Invalid file');
+      if (!confirm('Replace all current data with imported file?')) return;
+      state = { ...emptyState(), ...incoming };
+      toast('Imported');
+      render();
+    } catch (err) {
+      toast('Import failed: ' + err.message, true);
+    }
+  };
+  reader.readAsText(file);
+  e.target.value = '';
+}
+
+function wipeData() {
+  if (!confirm('WIPE ALL DATA? This cannot be undone.')) return;
+  if (!confirm('Are you absolutely sure?')) return;
+  state = emptyState();
+  saveState();
+  toast('Wiped');
+  render();
+}
+
+/* ---------------- EVENT WIRING ---------------- */
+function init() {
+  // tabs
+  $$('.tab').forEach(tab => {
+    tab.addEventListener('click', () => setView(tab.dataset.view));
+  });
+
+  // run view
+  $('#start-build-route').addEventListener('click', startBuildRoute);
+  $('#complete-run').addEventListener('click', completeRun);
+  $('#rebuild-route').addEventListener('click', () => {
+    if (!confirm('Rebuild route from current orders? Picked progress will be cleared.')) return;
+    startBuildRoute();
+  });
+  $('#reset-run').addEventListener('click', resetRun);
+
+  // run view mode toggle (route vs by-order)
+  $$('.mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      ui.runMode = btn.dataset.mode;
+      renderRun();
+    });
+  });
+
+  // history
+  $('#export-history-csv').addEventListener('click', exportAllHistoryCSV);
+
+  // orders
+  $('#add-order-btn').addEventListener('click', () => openOrderModal());
+  $('#bulk-import').addEventListener('click', handleBulkImport);
+
+  // inventory
+  $('#add-product-btn').addEventListener('click', () => openProductModal());
+  $('#inv-search').addEventListener('input', e => {
+    ui.invSearch = e.target.value;
+    renderInventory();
+  });
+
+  // map
+  $('#map-config-btn').addEventListener('click', () => {
+    ui.mapMode = ui.mapMode === 'config' ? 'view' : 'config';
+    $('#map-config-btn').textContent = ui.mapMode === 'config' ? 'DONE' : 'CONFIG';
+    ui.selectedCellId = null;
+    renderMap();
+  });
+
+  // settings
+  $('#reset-rules').addEventListener('click', () => {
+    if (confirm('Reset machine rules to defaults?')) {
+      state.machineRules = defaultRules();
+      renderSettings();
+    }
+  });
+  $('#export-data').addEventListener('click', exportData);
+  $('#import-data').addEventListener('click', importData);
+  $('#import-file').addEventListener('change', handleImportFile);
+  $('#wipe-data').addEventListener('click', wipeData);
+
+  // modal
+  $('#modal-close').addEventListener('click', closeModal);
+  $('#modal').addEventListener('click', e => {
+    if (e.target.id === 'modal') closeModal();
+  });
+
+  // First-run seed
+  if (!state.seenOnboard && state.products.length === 0) {
+    seedSampleData();
+    state.seenOnboard = true;
+  }
+
+  setView('run');
+
+  // register service worker for offline
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW registration failed', err));
+  }
+}
+
+function seedSampleData() {
+  // A few sample products in sample zones so first-run demo works
+  const zones = state.map.cells.filter(c => c.type === 'zone');
+  if (zones.length < 4) return;
+  state.products.push(
+    { id: uid('p'), name: 'Japanese Maple', potSize: '7 Gal', cellId: zones[3].id },
+    { id: uid('p'), name: 'Boxwood', potSize: '3 Gal', cellId: zones[8].id },
+    { id: uid('p'), name: 'Red Oak', potSize: '45 Gal', cellId: zones[17].id },
+    { id: uid('p'), name: 'Dwarf Holly', potSize: '1 Gal', cellId: zones[2].id },
+    { id: uid('p'), name: 'Azalea', potSize: '3 Gal', cellId: zones[12].id },
+  );
+}
+
+document.addEventListener('DOMContentLoaded', init);
