@@ -626,15 +626,15 @@ textarea:focus {
 /* ---------- MAP ---------- */
 .map-legend {
   display: flex;
-  gap: 16px;
-  margin-bottom: 12px;
+  gap: 12px;
+  margin-bottom: 10px;
   font-family: var(--font-display);
-  font-size: 11px;
+  font-size: 10px;
   color: var(--ink-dim);
-  letter-spacing: 0.05em;
+  letter-spacing: 0.04em;
   flex-wrap: wrap;
 }
-.legend-item { display: flex; align-items: center; gap: 6px; }
+.legend-item { display: flex; align-items: center; gap: 5px; }
 .legend-dot {
   width: 12px; height: 12px;
   border-radius: 2px;
@@ -642,56 +642,112 @@ textarea:focus {
 }
 .legend-entrance { background: var(--accent); }
 .legend-zone { background: #3a4a3a; }
-.legend-aisle { background: var(--bg-card); border: 1px solid var(--border-strong); }
+.legend-aisle { background: var(--bg-raised); border: 1px solid var(--border-strong); }
+.legend-blocked { background: var(--bg); border: 1px solid var(--border); }
+
+/* Painting tool palette shown in CONFIG mode */
+.map-toolbar {
+  background: var(--bg-card);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-md);
+  padding: 10px;
+  margin-bottom: 10px;
+}
+.tool-group {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.tool-btn {
+  flex: 1 1 auto;
+  min-width: 60px;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--ink-dim);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  padding: 10px 8px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  min-height: 40px;
+}
+.tool-btn.active {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+.tool-actions {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.tool-hint {
+  font-size: 11px;
+  color: var(--ink-dim);
+  font-style: italic;
+}
 
 .map-wrap {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--r-md);
-  padding: 10px;
+  padding: 6px;
   overflow: auto;
   margin-bottom: 12px;
+  max-height: 60vh;
+  -webkit-overflow-scrolling: touch;
+}
+/* When painting in CONFIG mode, disable scroll gestures so drags paint instead of scroll */
+.map-wrap.config-painting {
+  touch-action: none;
 }
 .facility-map {
   display: grid;
-  gap: 3px;
+  gap: 1px;
   margin: 0 auto;
 }
 .map-cell {
   aspect-ratio: 1;
-  min-width: 42px;
+  min-width: 16px;
   display: grid;
   place-items: center;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid transparent;
+  border-radius: 2px;
   font-family: var(--font-display);
-  font-size: 10px;
+  font-size: 8px;
   font-weight: 600;
   cursor: pointer;
   position: relative;
   color: var(--ink-dim);
+  user-select: none;
+  -webkit-user-select: none;
 }
-.map-cell.aisle { background: var(--bg-raised); color: var(--ink-dim); }
-.map-cell.zone { background: #2a3a2a; border-color: #3a4a3a; color: var(--ink); }
-.map-cell.zone.has-products { background: #3a4a3a; }
-.map-cell.entrance { background: var(--accent); color: var(--accent-ink); }
-.map-cell.path {
-  background: var(--bg-card);
-  border: 1px dashed var(--border-strong);
-  color: var(--ink-faint);
-}
+.map-cell.blocked { background: var(--bg); opacity: 0.4; }
+.map-cell.aisle { background: var(--bg-raised); border-color: var(--border); color: var(--ink-faint); }
+.map-cell.zone { background: #3a4a3a; border-color: #4a5a4a; color: var(--ink); }
+.map-cell.zone.has-products { background: #4e6247; border-color: #5e7657; }
+.map-cell.zone.custom-label { border-color: var(--info); }
+.map-cell.entrance { background: var(--accent); color: var(--accent-ink); font-size: 7px; }
 .map-cell.selected {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
+  z-index: 1;
 }
 .map-cell .cell-count {
   position: absolute;
-  top: 1px; right: 3px;
-  font-size: 9px;
+  top: 0; right: 1px;
+  font-size: 8px;
   color: var(--accent);
+  line-height: 1;
 }
 .map-cell.entrance .cell-count { color: var(--accent-ink); }
+
+/* Larger cells when we're in the smaller config/zoom mode (could be added later) */
+.facility-map.large .map-cell { min-width: 26px; font-size: 10px; }
 
 .map-info {
   font-size: 13px;
@@ -889,5 +945,5 @@ textarea:focus {
 @media (max-width: 400px) {
   .tab { padding: 14px 14px; font-size: 11px; }
   .brand-title { font-size: 13px; }
-  .map-cell { min-width: 38px; font-size: 9px; }
+  .map-cell { min-width: 14px; font-size: 7px; }
 }

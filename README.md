@@ -13,13 +13,30 @@ The service worker caches all assets on first load, so after that it works with 
 
 ## Quick Start
 
-1. **Map tab → CONFIG** to reshape the facility map. Tap cells to cycle: Zone → Aisle → Entrance → Zone. You need exactly one Entrance (the return/dispatch point). Aisles are walkable corridors (cost 1 to traverse); zones are product bays (passable but cost 3 — the route prefers aisles).
-2. **Inventory tab → + PRODUCT** to add products. Assign each to a zone cell. Products without locations will be listed as "not on map" when routes are built.
-3. **Orders tab** — paste rows in the format `order#, product, qty, pot size` (one per line). Missing products are created automatically with the pot size you provide. Or tap + ORDER for a manual entry form.
-4. **Run tab → BUILD ROUTE** — the app plans a greedy nearest-neighbor route starting and ending at the Entrance, aggregating quantities of the same product across orders into a single pick.
-5. Toggle **BY ROUTE / BY ORDER** on the run view. BY ROUTE is the picking workflow; BY ORDER is the staging/sorting workflow after picking is done.
-6. Tap the checkbox on each pick as it's completed.
-7. **COMPLETE** archives the run to History (with CSV export) and clears the current orders for the next day.
+The app launches with a blank 35×50 grid — every cell is "blocked" (unwalkable) except one entrance at the bottom. You paint the facility layout in Map → CONFIG:
+
+1. **Map tab → CONFIG** opens the paint palette. Pick a tool, then tap or drag across cells to paint them. Five tools:
+   - **AISLE** — walkable paths (cost 1 to traverse, preferred by router)
+   - **ZONE** — product bays (cost 3 to traverse — passable but the router avoids them when possible)
+   - **ENTRANCE** — where the route starts and ends; there's always exactly one, so setting a new one clears the old
+   - **ERASE** — reverts a cell back to blocked (unwalkable). Also unassigns any product sitting on it
+   - **LABEL** — tap a zone to give it a custom name like "Greenhouse 3" or "Field A-North"
+   - **CLEAR ALL** wipes every cell back to blocked (except the entrance) and unassigns all products. Useful for starting over.
+2. **Settings → MAP GRID SIZE** resizes the grid. Shrinking removes out-of-bounds cells and unassigns any products on them (products stay in Inventory, they just lose their location).
+3. **Inventory tab → + PRODUCT** to add products. Assign each to a zone cell. Products without locations will be listed as "not on map" when routes are built.
+4. **Orders tab** — paste rows in the format `order#, product, qty, pot size` (one per line). Missing products are created automatically with the pot size you provide. Or tap + ORDER for a manual entry form.
+5. **Run tab → BUILD ROUTE** — the app plans a greedy nearest-neighbor route starting and ending at the Entrance, aggregating quantities of the same product across orders into a single pick.
+6. Toggle **BY ROUTE / BY ORDER** on the run view. BY ROUTE is the picking workflow; BY ORDER is the staging/sorting workflow after picking is done.
+7. Tap the checkbox on each pick as it's completed.
+8. **COMPLETE** archives the run to History (with CSV export) and clears the current orders for the next day.
+
+### Tips for laying out a real facility
+
+- Start with ENTRANCE tool and place the loading dock where it actually is.
+- Switch to AISLE tool and sketch the main roads/corridors the worker and vehicles use. Drag your finger to paint in strokes.
+- Switch to ZONE tool and fill in the bench rows, field sections, or greenhouses.
+- Use LABEL to name the important areas so they show up by name in the pick run (instead of `R12-C05`).
+- The router *can* cut through zones when that's the only path, but it strongly prefers aisles. If a product location seems unreachable or the route looks weird, check that there's an aisle network connecting the zone to the entrance.
 
 ## Machine Rules (defaults)
 

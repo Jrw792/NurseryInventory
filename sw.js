@@ -1,5 +1,5 @@
 /* Nursery Ops service worker — offline-first */
-const CACHE = 'nursery-ops-v1';
+const CACHE = 'nursery-ops-v2';
 const ASSETS = [
   './',
   './index.html',

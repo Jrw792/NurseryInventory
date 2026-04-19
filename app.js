@@ -20,30 +20,27 @@ function emptyState() {
 }
 
 function defaultMap() {
-  // 10 cols x 8 rows, sample layout
-  // types: 'aisle' (walkable path), 'zone' (pickable area), 'entrance'
-  const cols = 10, rows = 8;
+  // 35 cols x 50 rows — blank slate. Everything starts blocked (unwalkable);
+  // the user paints aisles/zones/entrance in the Map tab's CONFIG mode.
+  // A single entrance is pre-placed near the bottom-middle so there's a starting anchor.
+  const cols = 35, rows = 50;
   const cells = [];
+  const entRow = rows - 1;
+  const entCol = Math.floor(cols / 2);
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      let type = 'zone';
+      let type = 'blocked';
       let label = '';
-      // Aisles on col 0, col 5, col 9 and row 3
-      if (c === 0 || c === 5 || c === 9) type = 'aisle';
-      if (r === 3) type = 'aisle';
-      if (r === 7 && c === 0) { type = 'entrance'; label = 'IN/OUT'; }
-      if (type === 'zone') {
-        // Label by quadrant
-        const quad = (r < 3 ? 'A' : 'B') + (c < 5 ? '1' : '2');
-        label = `${quad}-${r}${c}`;
-      } else if (type === 'aisle') {
-        label = '';
+      if (r === entRow && c === entCol) {
+        type = 'entrance';
+        label = 'IN/OUT';
       }
       cells.push({
         id: `${r}_${c}`,
         r, c,
         type,
         label,
+        customLabel: false, // true if user renamed this zone
       });
     }
   }
@@ -89,6 +86,9 @@ let ui = {
   currentView: 'run',
   selectedCellId: null,
   mapMode: 'view', // 'view' or 'config'
+  paintTool: 'aisle', // when in config mode: 'aisle', 'zone', 'entrance', 'blocked', 'label'
+  isPainting: false,  // true while a drag-paint is in progress
+  paintedInDrag: new Set(), // cells already painted this drag (prevents re-painting the same cell)
   invSearch: '',
   runMode: 'route', // 'route' or 'order'
 };
@@ -142,8 +142,10 @@ function bfsDistance(fromCellId, toCellId) {
   const { cols, rows, cells } = state.map;
   const cellMap = new Map(cells.map(c => [c.id, c]));
   // Cost to step INTO a cell. Aisles and entrance are the "roads"; zones are passable but penalized.
+  // Blocked cells are impassable.
   const costOf = (c) => {
     if (!c) return Infinity;
+    if (c.type === 'blocked') return Infinity;
     if (c.type === 'aisle' || c.type === 'entrance') return 1;
     return 3; // zone — walkable but discouraged
   };
@@ -587,8 +589,16 @@ function renderInventory() {
 function renderMap() {
   const grid = $('#facility-map');
   const { cols, rows, cells } = state.map;
-  grid.style.gridTemplateColumns = `repeat(${cols}, minmax(42px, 1fr))`;
+  // Dynamic cell min-size: shrink for larger grids so everything fits without being microscopic
+  const minCell = cols > 30 ? 16 : cols > 20 ? 22 : 32;
+  grid.style.gridTemplateColumns = `repeat(${cols}, minmax(${minCell}px, 1fr))`;
   grid.innerHTML = '';
+
+  // Toolbar visibility follows mapMode
+  $('#map-toolbar').classList.toggle('hidden', ui.mapMode !== 'config');
+  // Disable touch-scrolling inside the map when painting so drags paint instead of scroll
+  const wrap = grid.parentElement;
+  if (wrap) wrap.classList.toggle('config-painting', ui.mapMode === 'config');
 
   // count products per zone
   const countByCell = new Map();
@@ -603,23 +613,179 @@ function renderMap() {
     if (cell.id === ui.selectedCellId) div.classList.add('selected');
     const n = countByCell.get(cell.id) || 0;
     if (cell.type === 'zone' && n > 0) div.classList.add('has-products');
+    if (cell.type === 'zone' && cell.customLabel) div.classList.add('custom-label');
+    // Only render label text if it fits (zones and entrance)
+    const showLabel = (cell.type === 'entrance') || (cell.type === 'zone' && cols <= 30);
     div.innerHTML = `
-      <span>${escapeHtml(cell.label || '')}</span>
+      ${showLabel ? `<span>${escapeHtml(cell.label || '')}</span>` : ''}
       ${n > 0 ? `<span class="cell-count">${n}</span>` : ''}
     `;
-    div.addEventListener('click', () => onMapCellTap(cell.id));
+    div.dataset.cellId = cell.id;
     grid.appendChild(div);
   });
+
+  // Attach delegated pointer handlers on the grid container for tap + drag-paint
+  attachMapInteractions(grid);
 
   renderMapInfo();
 }
 
+// Attach pointer listeners once per render (grid is rebuilt each render)
+function attachMapInteractions(grid) {
+  // Use pointer events — they unify mouse and touch, and work fine on iOS Safari.
+  const getCellId = (target) => {
+    const el = target.closest('.map-cell');
+    return el ? el.dataset.cellId : null;
+  };
+
+  grid.addEventListener('pointerdown', (e) => {
+    const id = getCellId(e.target);
+    if (!id) return;
+    // In view mode, tap = select. In config mode, tap-or-drag = paint.
+    if (ui.mapMode !== 'config') {
+      ui.selectedCellId = id;
+      renderMap();
+      return;
+    }
+    ui.isPainting = true;
+    ui.paintedInDrag = new Set();
+    applyPaint(id);
+    // Capture so drag continues even if finger leaves original cell
+    try { grid.setPointerCapture(e.pointerId); } catch (err) {}
+    e.preventDefault();
+  });
+
+  grid.addEventListener('pointermove', (e) => {
+    if (!ui.isPainting) return;
+    // While the pointer is down, find the cell under the current position
+    const elUnder = document.elementFromPoint(e.clientX, e.clientY);
+    const id = elUnder ? getCellId(elUnder) : null;
+    if (id && !ui.paintedInDrag.has(id)) {
+      applyPaint(id);
+    }
+  });
+
+  const endDrag = () => {
+    if (!ui.isPainting) return;
+    ui.isPainting = false;
+    ui.paintedInDrag.clear();
+    saveState();
+  };
+  grid.addEventListener('pointerup', endDrag);
+  grid.addEventListener('pointercancel', endDrag);
+  grid.addEventListener('pointerleave', endDrag);
+}
+
+// Apply current paint tool to a single cell.
+function applyPaint(cellId) {
+  const cell = findCellById(cellId);
+  if (!cell) return;
+  ui.paintedInDrag.add(cellId);
+
+  const tool = ui.paintTool;
+
+  if (tool === 'label') {
+    // Only labelable when zone
+    if (cell.type !== 'zone') {
+      toast('Tap a ZONE to label it', true);
+      return;
+    }
+    const current = cell.customLabel ? cell.label : '';
+    const name = prompt('Zone label (leave empty to reset):', current || '');
+    if (name === null) return; // cancelled
+    const trimmed = name.trim();
+    if (trimmed === '') {
+      cell.customLabel = false;
+      cell.label = autoZoneLabel(cell);
+    } else {
+      cell.label = trimmed;
+      cell.customLabel = true;
+    }
+    renderMap();
+    return;
+  }
+
+  if (tool === 'entrance') {
+    // Exactly one entrance — clear existing first
+    const existing = getEntrance();
+    if (existing && existing.id !== cell.id) {
+      existing.type = 'aisle';
+      existing.label = '';
+    }
+    cell.type = 'entrance';
+    cell.label = 'IN/OUT';
+    cell.customLabel = false;
+    renderMapCell(cell.id);
+    // Also re-render the old entrance cell
+    if (existing && existing.id !== cell.id) renderMapCell(existing.id);
+    return;
+  }
+
+  // aisle / zone / blocked
+  if (tool === 'aisle') {
+    if (cell.type === 'entrance') return; // don't overwrite entrance via paint
+    cell.type = 'aisle';
+    cell.label = '';
+    cell.customLabel = false;
+  } else if (tool === 'zone') {
+    if (cell.type === 'entrance') return;
+    cell.type = 'zone';
+    if (!cell.customLabel) cell.label = autoZoneLabel(cell);
+  } else if (tool === 'blocked') {
+    if (cell.type === 'entrance') {
+      toast('Cannot erase the entrance', true);
+      return;
+    }
+    // If a product is on this cell, unassign it
+    state.products.forEach(p => { if (p.cellId === cell.id) p.cellId = null; });
+    cell.type = 'blocked';
+    cell.label = '';
+    cell.customLabel = false;
+  }
+  renderMapCell(cell.id);
+}
+
+function autoZoneLabel(cell) {
+  // Simple grid-coord label, e.g. "R03-C14"
+  const r = String(cell.r + 1).padStart(2, '0');
+  const c = String(cell.c + 1).padStart(2, '0');
+  return `R${r}-C${c}`;
+}
+
+// Re-render a single cell in place without rebuilding the whole grid (performance during drag)
+function renderMapCell(cellId) {
+  const grid = $('#facility-map');
+  const el = grid.querySelector(`.map-cell[data-cell-id="${cellId}"]`);
+  if (!el) return;
+  const cell = findCellById(cellId);
+  if (!cell) return;
+  el.className = 'map-cell ' + cell.type;
+  if (cell.id === ui.selectedCellId) el.classList.add('selected');
+  const productCount = state.products.filter(p => p.cellId === cellId).length;
+  if (cell.type === 'zone' && productCount > 0) el.classList.add('has-products');
+  if (cell.type === 'zone' && cell.customLabel) el.classList.add('custom-label');
+  const showLabel = (cell.type === 'entrance') || (cell.type === 'zone' && state.map.cols <= 30);
+  el.innerHTML = `
+    ${showLabel ? `<span>${escapeHtml(cell.label || '')}</span>` : ''}
+    ${productCount > 0 ? `<span class="cell-count">${productCount}</span>` : ''}
+  `;
+}
+
 function renderMapInfo() {
   const box = $('#map-info');
+  if (ui.mapMode === 'config') {
+    const toolHint = {
+      aisle: 'Painting AISLES (walkable paths, preferred by router)',
+      zone: 'Painting ZONES (product bays, passable but discouraged)',
+      entrance: 'Setting ENTRANCE (one per map)',
+      blocked: 'ERASING to blocked (unwalkable)',
+      label: 'Tap a zone to give it a custom name',
+    }[ui.paintTool];
+    box.innerHTML = `<strong>CONFIG MODE</strong> · ${escapeHtml(toolHint)}`;
+    return;
+  }
   if (!ui.selectedCellId) {
-    box.innerHTML = ui.mapMode === 'config'
-      ? '<strong>CONFIG MODE</strong> · Tap a cell to change its type. Tap again to cycle: zone → aisle → entrance → zone.'
-      : 'Tap a cell to view its contents.';
+    box.innerHTML = 'Tap a cell to view its contents.';
     return;
   }
   const cell = findCellById(ui.selectedCellId);
@@ -629,7 +795,11 @@ function renderMapInfo() {
     return;
   }
   if (cell.type === 'aisle') {
-    box.innerHTML = `<strong>Aisle</strong> · walkable path (${cell.id})`;
+    box.innerHTML = `<strong>Aisle</strong> · walkable path`;
+    return;
+  }
+  if (cell.type === 'blocked') {
+    box.innerHTML = `<strong>Blocked</strong> · impassable`;
     return;
   }
   // zone
@@ -642,31 +812,79 @@ function renderMapInfo() {
     products.map(p => `<span style="color:var(--ink-dim); font-size:12px">• ${escapeHtml(p.name)} <span style="color:var(--ink-faint)">(${escapeHtml(p.potSize || '?')})</span></span>`).join('<br>');
 }
 
-function onMapCellTap(cellId) {
-  if (ui.mapMode === 'config') {
-    // cycle type
-    const cell = findCellById(cellId);
-    if (!cell) return;
-    const currentEntrance = getEntrance();
-    if (cell.type === 'zone') {
-      cell.type = 'aisle';
-      cell.label = '';
-    } else if (cell.type === 'aisle') {
-      // only one entrance — remove existing first
-      if (currentEntrance && currentEntrance.id !== cell.id) currentEntrance.type = 'aisle';
-      cell.type = 'entrance';
-      cell.label = 'IN/OUT';
-    } else if (cell.type === 'entrance') {
-      cell.type = 'zone';
-      // relabel
-      const quad = (cell.r < Math.ceil(state.map.rows / 2) ? 'A' : 'B') + (cell.c < Math.ceil(state.map.cols / 2) ? '1' : '2');
-      cell.label = `${quad}-${cell.r}${cell.c}`;
-    }
-    renderMap();
+function clearMap() {
+  if (!confirm('Clear the entire map? All cells will be reset to blocked and all products will be unassigned.')) return;
+  // Unassign all products
+  state.products.forEach(p => { p.cellId = null; });
+  // Reset every cell to blocked, keep entrance if we have one
+  const entrance = getEntrance();
+  state.map.cells.forEach(cell => {
+    if (entrance && cell.id === entrance.id) return;
+    cell.type = 'blocked';
+    cell.label = '';
+    cell.customLabel = false;
+  });
+  toast('Map cleared');
+  render();
+}
+
+function applyGridSize() {
+  const newCols = parseInt($('#grid-cols').value);
+  const newRows = parseInt($('#grid-rows').value);
+  if (!newCols || !newRows || newCols < 5 || newRows < 5) {
+    toast('Size must be at least 5x5', true);
     return;
   }
-  ui.selectedCellId = cellId;
-  renderMap();
+  if (newCols > 80 || newRows > 100) {
+    toast('Size too large', true);
+    return;
+  }
+  if (newCols === state.map.cols && newRows === state.map.rows) {
+    toast('No change');
+    return;
+  }
+  // Compute which cells will be removed
+  const removedCellIds = new Set();
+  state.map.cells.forEach(c => {
+    if (c.r >= newRows || c.c >= newCols) removedCellIds.add(c.id);
+  });
+  const removedProducts = state.products.filter(p => removedCellIds.has(p.cellId)).length;
+
+  let msg = `Resize grid to ${newCols} × ${newRows}?`;
+  if (removedCellIds.size > 0) msg += ` ${removedCellIds.size} cell${removedCellIds.size !== 1 ? 's' : ''} will be removed.`;
+  if (removedProducts > 0) msg += ` ${removedProducts} product${removedProducts !== 1 ? 's' : ''} will be unassigned.`;
+  if (!confirm(msg)) return;
+
+  // Unassign affected products
+  state.products.forEach(p => { if (removedCellIds.has(p.cellId)) p.cellId = null; });
+
+  // Build the new grid, copying existing cells where they fit
+  const oldCells = new Map(state.map.cells.map(c => [c.id, c]));
+  const newCells = [];
+  for (let r = 0; r < newRows; r++) {
+    for (let c = 0; c < newCols; c++) {
+      const id = `${r}_${c}`;
+      const existing = oldCells.get(id);
+      if (existing) {
+        newCells.push(existing);
+      } else {
+        newCells.push({
+          id, r, c,
+          type: 'blocked',
+          label: '',
+          customLabel: false,
+        });
+      }
+    }
+  }
+  state.map.cols = newCols;
+  state.map.rows = newRows;
+  state.map.cells = newCells;
+
+  // Ensure there's still exactly one entrance (if the old one got cut, preserve)
+  // The old entrance may still exist; otherwise the router will warn at build time.
+  toast(`Grid resized to ${newCols} × ${newRows}`);
+  render();
 }
 
 /* ---------- SETTINGS RENDER ---------- */
@@ -691,6 +909,12 @@ function renderSettings() {
     chip.textContent = p;
     chips.appendChild(chip);
   });
+
+  // Grid size inputs reflect current map dimensions
+  const colsInput = $('#grid-cols');
+  const rowsInput = $('#grid-rows');
+  if (colsInput) colsInput.value = state.map.cols;
+  if (rowsInput) rowsInput.value = state.map.rows;
 
   // storage info
   try {
@@ -1201,8 +1425,23 @@ function init() {
     ui.mapMode = ui.mapMode === 'config' ? 'view' : 'config';
     $('#map-config-btn').textContent = ui.mapMode === 'config' ? 'DONE' : 'CONFIG';
     ui.selectedCellId = null;
+    // Reset paint tool to default each time config mode is entered
+    if (ui.mapMode === 'config') ui.paintTool = 'aisle';
+    // Update tool button active states
+    $$('.tool-btn').forEach(b => b.classList.toggle('active', b.dataset.tool === ui.paintTool));
     renderMap();
   });
+
+  // paint tool selection
+  $$('.tool-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      ui.paintTool = btn.dataset.tool;
+      $$('.tool-btn').forEach(b => b.classList.toggle('active', b === btn));
+      renderMapInfo();
+    });
+  });
+
+  $('#clear-map').addEventListener('click', clearMap);
 
   // settings
   $('#reset-rules').addEventListener('click', () => {
@@ -1211,6 +1450,7 @@ function init() {
       renderSettings();
     }
   });
+  $('#apply-grid-size').addEventListener('click', applyGridSize);
   $('#export-data').addEventListener('click', exportData);
   $('#import-data').addEventListener('click', importData);
   $('#import-file').addEventListener('change', handleImportFile);
@@ -1237,16 +1477,8 @@ function init() {
 }
 
 function seedSampleData() {
-  // A few sample products in sample zones so first-run demo works
-  const zones = state.map.cells.filter(c => c.type === 'zone');
-  if (zones.length < 4) return;
-  state.products.push(
-    { id: uid('p'), name: 'Japanese Maple', potSize: '7 Gal', cellId: zones[3].id },
-    { id: uid('p'), name: 'Boxwood', potSize: '3 Gal', cellId: zones[8].id },
-    { id: uid('p'), name: 'Red Oak', potSize: '45 Gal', cellId: zones[17].id },
-    { id: uid('p'), name: 'Dwarf Holly', potSize: '1 Gal', cellId: zones[2].id },
-    { id: uid('p'), name: 'Azalea', potSize: '3 Gal', cellId: zones[12].id },
-  );
+  // Map is blank by default — no zones to seed products into.
+  // First-time users are guided to the Map tab via the empty-state hint on the Inventory page.
 }
 
 document.addEventListener('DOMContentLoaded', init);

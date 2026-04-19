@@ -113,10 +113,25 @@
       <button class="btn btn-small" id="map-config-btn">CONFIG</button>
     </div>
 
-    <div class="map-legend">
+    <div id="map-toolbar" class="map-toolbar hidden">
+      <div class="tool-group" id="map-tools">
+        <button class="tool-btn active" data-tool="aisle">AISLE</button>
+        <button class="tool-btn" data-tool="zone">ZONE</button>
+        <button class="tool-btn" data-tool="entrance">ENTRANCE</button>
+        <button class="tool-btn" data-tool="blocked">ERASE</button>
+        <button class="tool-btn" data-tool="label">LABEL</button>
+      </div>
+      <div class="tool-actions">
+        <button class="btn btn-ghost btn-small" id="clear-map">CLEAR ALL</button>
+      </div>
+      <div class="tool-hint">Tap or drag to paint. Entrance replaces any existing one.</div>
+    </div>
+
+    <div class="map-legend" id="map-legend">
       <div class="legend-item"><span class="legend-dot legend-entrance"></span>Entrance</div>
       <div class="legend-item"><span class="legend-dot legend-zone"></span>Zone</div>
       <div class="legend-item"><span class="legend-dot legend-aisle"></span>Aisle</div>
+      <div class="legend-item"><span class="legend-dot legend-blocked"></span>Blocked</div>
     </div>
 
     <div class="map-wrap">
@@ -124,7 +139,7 @@
     </div>
 
     <div class="map-info" id="map-info">
-      Tap a cell to view contents or mark as entrance.
+      Tap a cell to view contents.
     </div>
   </section>
 
@@ -139,6 +154,22 @@
       <div class="settings-desc">Determines which vehicle to use based on pot size and quantity.</div>
       <div id="machine-rules"></div>
       <button class="btn btn-ghost btn-small" id="reset-rules">RESET TO DEFAULTS</button>
+    </div>
+
+    <div class="settings-card">
+      <div class="settings-title">MAP GRID SIZE</div>
+      <div class="settings-desc">Resize the facility grid. Shrinking will unassign products on removed cells (they stay in Inventory).</div>
+      <div class="form-row">
+        <div class="form-field">
+          <label class="form-label">Columns</label>
+          <input type="number" class="form-input" id="grid-cols" min="5" max="80" step="1" />
+        </div>
+        <div class="form-field">
+          <label class="form-label">Rows</label>
+          <input type="number" class="form-input" id="grid-rows" min="5" max="100" step="1" />
+        </div>
+      </div>
+      <button class="btn btn-primary btn-small" id="apply-grid-size">APPLY SIZE</button>
     </div>
 
     <div class="settings-card">
