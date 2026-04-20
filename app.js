@@ -8,43 +8,282 @@ const LS_KEY = 'nursery_ops_v1';
 
 function emptyState() {
   return {
-    products: [],      // {id, name, potSize, cellId}
+    products: [],      // {id, name, potSize, cellIds: [string]}  -- cellIds is array (multi-location supported)
     orders: [],        // {id, number, items: [{productId, qty}], createdAt}
-    run: null,         // {stops: [{cellId, picks:[{productId, qty, orderNums:[]}], machine, done}], pickedKeys: Set-like object}
+    run: null,
     map: defaultMap(),
     machineRules: defaultRules(),
-    potSizes: ['4"', '1 Gal', '3 Gal', '5 Gal', '7 Gal', '15 Gal', '30 Gal', '45 Gal', 'Root Ball'],
-    history: [],       // [{id, completedAt, stopsCount, totalPicks, orderNumbers: [], snapshot}]
+    potSizes: ['4"', '1 Gal', '3 Gal', '5 Gal', '7 Gal', '10 Gal', '15 Gal', '30 Gal', '45 Gal', 'Root Ball', 'Unknown'],
+    history: [],
     seenOnboard: false,
   };
 }
 
 function defaultMap() {
-  // 35 cols x 50 rows — blank slate. Everything starts blocked (unwalkable);
-  // the user paints aisles/zones/entrance in the Map tab's CONFIG mode.
-  // A single entrance is pre-placed near the bottom-middle so there's a starting anchor.
-  const cols = 35, rows = 50;
+  // Buck Jones Nursery layout — 45 cols x 55 rows.
+  // Pre-painted with the real facility zones. Users can modify via Map → CONFIG.
+  const cols = 45, rows = 55;
   const cells = [];
-  const entRow = rows - 1;
-  const entCol = Math.floor(cols / 2);
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      let type = 'blocked';
-      let label = '';
-      if (r === entRow && c === entCol) {
-        type = 'entrance';
-        label = 'IN/OUT';
-      }
       cells.push({
         id: `${r}_${c}`,
         r, c,
-        type,
-        label,
-        customLabel: false, // true if user renamed this zone
+        type: 'blocked',
+        label: '',
+        customLabel: false,
       });
     }
   }
+
+  // Helper: paint a rectangle (inclusive)
+  const cellAt = (r, c) => cells[r * cols + c];
+  const paintRect = (r1, c1, r2, c2, type, label, customLabel) => {
+    for (let r = r1; r <= r2; r++) {
+      for (let c = c1; c <= c2; c++) {
+        if (r < 0 || r >= rows || c < 0 || c >= cols) continue;
+        const cell = cellAt(r, c);
+        cell.type = type;
+        if (label !== undefined) cell.label = label;
+        if (customLabel !== undefined) cell.customLabel = customLabel;
+      }
+    }
+  };
+
+  // ==== Paint aisles first (horizontal rows and vertical columns) ====
+  const aisleRows = [0, 12, 18, 19, 24, 29, 34, 42, 49, 50, 54];
+  const aisleCols = [0, 1, 10, 11, 20, 21, 30, 31, 38, 39, 44];
+  aisleRows.forEach(r => paintRect(r, 0, r, cols - 1, 'aisle', '', false));
+  aisleCols.forEach(c => paintRect(0, c, rows - 1, c, 'aisle', '', false));
+
+  // ==== Paint zones (overwriting aisles where they overlap) ====
+
+  // E Section (top-left) — B&B Evergreens/Dogwoods/Maples
+  paintRect(1, 2, 2, 7,   'zone', 'E5', true);
+  paintRect(3, 2, 4, 7,   'zone', 'E4', true);
+  paintRect(5, 2, 6, 7,   'zone', 'E3', true);
+  paintRect(7, 2, 8, 7,   'zone', 'E2', true);
+  paintRect(9, 2, 10, 7,  'zone', 'E1', true);
+
+  // Shop / Fertilizer (top-middle)
+  paintRect(1, 13, 7, 18, 'zone', 'Shop', true);
+
+  // The Hill (top-right area) - Shade Trees B&B
+  paintRect(1, 22, 7, 27, 'zone', 'HILL', true);
+
+  // Upper working area
+  paintRect(13, 4, 17, 8,   'zone', 'JAP PAD', true);
+  paintRect(13, 11, 15, 17, 'zone', 'Large Container Trees', true);
+  paintRect(13, 18, 15, 22, 'zone', 'Crape Myrtles', true);
+
+  // Sod
+  paintRect(17, 22, 19, 29, 'zone', 'Sod Pad', true);
+  paintRect(20, 22, 20, 29, 'zone', 'Sod Pieces', true);
+
+  // A section (upper block) — Native Azaleas/Hydrangeas, Azaleas/Cephalotaxus, Japanese Maples
+  paintRect(20, 2, 23, 9, 'zone', 'A9', true);
+  paintRect(25, 2, 27, 3, 'zone', 'A8', true);
+  paintRect(25, 4, 27, 4, 'zone', 'A7', true);
+  paintRect(25, 5, 27, 5, 'zone', 'A6', true);
+  paintRect(25, 6, 27, 7, 'zone', 'A5', true);
+
+  // A section (lower block) — Shade Shrubs, Camellias, Hostas
+  paintRect(30, 2, 33, 2, 'zone', 'A4', true);
+  paintRect(30, 4, 33, 4, 'zone', 'A3', true);
+  paintRect(30, 5, 33, 6, 'zone', 'A2', true);
+  paintRect(30, 7, 33, 8, 'zone', 'A1', true);
+  // B section — vertical rows, B9 at top through B1 at bottom
+  const bZones = ['B9', 'B8', 'B7', 'B6', 'B5', 'B4', 'B3', 'B2', 'B1'];
+  bZones.forEach((name, i) => {
+    const r = 20 + i; // rows 20-28 for B9-B1
+    paintRect(r, 12, r, 19, 'zone', name, true);
+  });
+
+  // C section — C7-C1 top to bottom
+  const cZones = ['C7', 'C6', 'C5', 'C4', 'C3', 'C2', 'C1'];
+  cZones.forEach((name, i) => {
+    const r = 21 + i; // rows 21-27 for C7-C1
+    paintRect(r, 22, r, 29, 'zone', name, true);
+  });
+
+  // D section
+  paintRect(20, 32, 27, 34, 'zone', 'D3', true);
+  paintRect(20, 35, 27, 37, 'zone', 'D2', true);
+  paintRect(28, 32, 29, 34, 'zone', 'D3 Misc', true);
+  paintRect(28, 35, 29, 37, 'zone', 'D2 Drip', true);
+  paintRect(35, 32, 42, 37, 'zone', 'D1', true);
+
+  // Shade Trees & OLD DRIP (right side)
+  paintRect(20, 40, 33, 43, 'zone', 'Shade Trees', true);
+  paintRect(35, 40, 42, 43, 'zone', 'OLD DRIP', true);
+
+  // NEW DRIP (main body)
+  paintRect(35, 23, 42, 29, 'zone', 'NEW DRIP', true);
+
+  // Bottom row structures
+  paintRect(43, 12, 46, 17, 'zone', 'Office', true);
+  paintRect(43, 19, 46, 26, 'zone', 'Specialty Items', true);
+  paintRect(43, 2, 44, 7, 'zone', 'Bagged Material', true);
+  paintRect(46, 2, 48, 8, 'zone', 'Specimen Items', true);
+
+  // Stone/Mulch Yard
+  paintRect(51, 12, 53, 32, 'zone', 'Stone/Mulch Yard', true);
+
+  // Re-paint aisle rows on top of any accidentally-zoned cells in aisle-only rows
+  // (The bZones above intentionally sit on row 24 which was an aisle; we KEEP those as zones.)
+  // But also need to make sure aisles still connect. The C-zone at row 24 is C4, fine.
+
+  // Entrance at Office area — matches "YOU ARE HERE" on real map
+  const entCell = cellAt(47, 14);
+  entCell.type = 'entrance';
+  entCell.label = 'IN/OUT';
+  entCell.customLabel = false;
+
   return { cols, rows, cells };
+}
+
+function defaultProducts(map) {
+  // Pre-loaded inventory from Buck Jones Nursery's product sheet.
+  // Zone labels must match those painted in defaultMap().
+  // Format: [name, potSize, [zoneLabel1, zoneLabel2, ...]]
+  const items = [
+    ['Abelia', 'Unknown', ['C3', 'C4', 'C5']],
+    ['Anise', '3 Gal', ['A4']],
+    ['Anise', '7 Gal', ['D1']],
+    ['Anise Yellow', '3 Gal', ['C5']],
+    ['Annuals', 'Unknown', ['A1']],  // "BY A1" in source
+    ['Arborvitae', '15 Gal', ['D3']],
+    ['Arborvitae', '30 Gal', ['NEW DRIP']],
+    ['Arborvitae', '7 Gal', ['D2', 'D3']],
+    ['Arborvitae B&B', 'Root Ball', ['E1', 'E2', 'E3']],
+    ['Aucuba', 'Unknown', ['A4']],
+    ['Azalea (Encore/sun)', 'Unknown', ['B2', 'B3']],
+    ['Azalea (shade)', 'Unknown', ['A5', 'A6', 'B6']],
+    ['Azaleas Native', 'Unknown', ['A9']],
+    ['Blueberry', 'Unknown', ['B7']],
+    ['Bottlebrush Buckeyes', 'Unknown', ['B7', 'D2']],
+    ['Boxwoods', '3 Gal', ['C4', 'C5', 'C6']],
+    ['Boxwoods', '7 Gal', ['C7', 'D1', 'D3']],
+    ['Butterfly Bush', 'Unknown', ['B8', 'B9']],
+    ['Camellias', '15 Gal', ['D1']],
+    ['Camellias', '3 Gal', ['A1']],
+    ['Camellias', '7 Gal', ['A3']],
+    ['Carex', 'Unknown', ['C2']],
+    ['Cherry Flowering', '15 Gal', ['OLD DRIP']],
+    ['Cleyera', 'Unknown', ['C5']],
+    ['Conifers', '3 Gal', ['B9']],
+    ['Crape Myrtles', 'Unknown', ['NEW DRIP']],
+    ['Cryptomeria', '3 Gal', ['B9']],
+    ['Cryptomeria', '7 Gal', ['D2']],
+    ['Cypress Gold Mop', 'Unknown', ['B9']],
+    ['Cypress Leyland', '15 Gal', ['D3']],
+    ['Cypress Leyland', '7 Gal', ['D2']],
+    ['Daylilies', 'Unknown', ['C7']],
+    ['Distylium', 'Unknown', ['C3']],
+    ['Dogwood', '15 Gal', ['OLD DRIP']],
+    ['Evergreens', '15 Gal', ['D3', 'OLD DRIP']],
+    ['Evergreen Plants', '5 Gal', ['D1', 'D2']],
+    ['Evergreen Plants', '7 Gal', ['D1', 'D2']],
+    ['Evergreen Trees B&B', 'Root Ball', ['E1', 'E2', 'E3']],
+    ['Fatsia', 'Unknown', ['A4']],
+    ['Fern', '1 Gal', ['C1']],
+    ['Fern', '3 Gal', ['A4']],
+    ['Fruit Shrubs', 'Unknown', ['B7']],
+    ['Gardenias', 'Unknown', ['C6', 'B4', 'B9']],
+    ['Grass Ornamental', 'Unknown', ['C2', 'B9']],
+    ['Groundcovers', 'Unknown', ['B1', 'C1', 'C2']],
+    ['Holly', '15 Gal', ['OLD DRIP']],
+    ['Holly', '3 Gal', ['B5']],
+    ['Holly', '7 Gal', ['D1', 'D2']],
+    ['Hostas', 'Unknown', ['A2']],
+    ['Hydrangea (shade)', 'Unknown', ['A9']],
+    ['Hydrangea (sun)', 'Unknown', ['B9']],
+    ['Itea', 'Unknown', ['B8']],
+    ['Japanese Maples', 'Unknown', ['JAP PAD']],
+    ['Juniper', '1 Gal', ['B7']],
+    ['Laurel Cherry', 'Unknown', ['D2', 'OLD DRIP']],
+    ['Leucothoe', 'Unknown', ['A2']],
+    ['Ligustrum Sunshine', 'Unknown', ['B4']],
+    ['Ligustrum Waxleaf', 'Unknown', ['C6']],
+    ['Liriope', 'Unknown', ['B1']],
+    ['Loropetalum', '7 Gal', ['D1']],
+    ['Loropetalum Crimson Fire', 'Unknown', ['C3']],
+    ['Loropetalum Purple Daydream', 'Unknown', ['B4']],
+    ['Loropetalum Purple Diamond', 'Unknown', ['B4']],
+    ['Loropetalum Purple Pixie', 'Unknown', ['B4']],
+    ['Loropetalum Ruby', 'Unknown', ['C5']],
+    ['Magnolia', '15 Gal', ['OLD DRIP']],
+    ['Magnolia', '30 Gal', ['NEW DRIP']],
+    ['Maple', '15 Gal', ['OLD DRIP']],
+    ['Mondo Grass', 'Unknown', ['C1']],
+    ['Mountain Laurel', 'Unknown', ['A2']],
+    ['Nandina', 'Unknown', ['B6']],
+    ['Oak', '15 Gal', ['OLD DRIP']],
+    ['Osmanthus', '15 Gal', ['OLD DRIP']],
+    ['Osmanthus (Tea Olive)', '3 Gal', ['A4']],
+    ['Osmanthus (Tea Olive)', '7 Gal', ['D1']],
+    ['Palms', 'Unknown', ['D1', 'NEW DRIP']],
+    ['Peony', 'Unknown', ['A2']],
+    ['Perennials (shade)', 'Unknown', ['C1']],
+    ['Perennials (sun)', 'Unknown', ['B1']],
+    ['Pieris', 'Unknown', ['A2']],
+    ['Pittosporum', 'Unknown', ['A4', 'B4']],
+    ['Podocarpus', 'Unknown', ['A4', 'A5', 'B4']],
+    ['Proven Winners', 'Unknown', ['B9']],
+    ['Redbud', 'Unknown', ['OLD DRIP']],
+    ['Rhododendron', 'Unknown', ['C2']],
+    ['Rosemary', '3 Gal', ['C4']],
+    ['Roses', 'Unknown', ['B8']],
+    ['Sarcococca', 'Unknown', ['A4']],
+    ['Seasonal Items', 'Unknown', ['Specialty Items']],  // "Education" in source
+    ['Shade Trees', '15 Gal', ['OLD DRIP']],
+    ['Shade Trees B&B', 'Root Ball', ['HILL']],
+    ['Southern Living', 'Unknown', ['B4', 'B6']],
+    ['Spirea', 'Unknown', ['B8']],
+    ['Viburnum (deciduous)', 'Unknown', ['B7']],
+    ['Viburnum (evergreen)', 'Unknown', ['C4', 'C5']],
+    ['Vines', 'Unknown', ['C4']],
+    ['Yew', 'Unknown', ['A5']],
+  ];
+
+  // Build labelToCellId map from the provided map
+  const labelToCellIds = {};
+  for (const cell of map.cells) {
+    if (cell.type === 'zone' && cell.customLabel && cell.label) {
+      if (!labelToCellIds[cell.label]) labelToCellIds[cell.label] = [];
+      labelToCellIds[cell.label].push(cell.id);
+    }
+  }
+  // For each zone label, pick the top-left-most cell as the "primary" location.
+  // (Products assigned to a zone go to one representative cell; user can reassign later.)
+  const primaryCellFor = (label) => {
+    const ids = labelToCellIds[label];
+    if (!ids || ids.length === 0) return null;
+    // Pick cell with smallest r, then smallest c
+    const sorted = [...ids].sort((a, b) => {
+      const [ar, ac] = a.split('_').map(Number);
+      const [br, bc] = b.split('_').map(Number);
+      if (ar !== br) return ar - br;
+      return ac - bc;
+    });
+    return sorted[0];
+  };
+
+  const products = [];
+  for (const [name, potSize, zoneLabels] of items) {
+    const cellIds = [];
+    for (const label of zoneLabels) {
+      const cellId = primaryCellFor(label);
+      if (cellId) cellIds.push(cellId);
+    }
+    products.push({
+      id: uid('p'),
+      name,
+      potSize,
+      cellIds,
+    });
+  }
+  return products;
 }
 
 function defaultRules() {
@@ -64,7 +303,17 @@ function loadState() {
     const parsed = JSON.parse(raw);
     // Forward-compat: merge missing keys
     const base = emptyState();
-    return { ...base, ...parsed };
+    const merged = { ...base, ...parsed };
+    // Migrate: old products had `cellId: string` — convert to `cellIds: [string]`
+    if (Array.isArray(merged.products)) {
+      merged.products.forEach(p => {
+        if (p.cellIds === undefined) {
+          p.cellIds = p.cellId ? [p.cellId] : [];
+          delete p.cellId;
+        }
+      });
+    }
+    return merged;
   } catch (e) {
     console.error('loadState failed', e);
     return emptyState();
@@ -253,45 +502,89 @@ function buildRun() {
     }
   }
 
-  // Group picks by location cellId
-  const byCell = new Map();
+  // Multi-location routing:
+  // For each product-with-multiple-locations, we'll choose its "stop" location lazily during
+  // the tour, picking whichever of its locations is closest to our current position at that
+  // step. This gives much better routes than arbitrarily picking one location up front.
+  //
+  // Pre-index: picksByProduct maps productId -> aggregated pick (qty + orderNums).
+  // unplaced tracks products with zero locations.
   const unplaced = [];
+  const pickByProduct = new Map(); // productId -> pick
   for (const [pid, pick] of byProduct.entries()) {
     const product = findProductById(pid);
-    if (!product || !product.cellId) {
+    const cellIds = (product && Array.isArray(product.cellIds) ? product.cellIds : []).filter(Boolean);
+    if (!product || cellIds.length === 0) {
       unplaced.push(pick);
       continue;
     }
-    if (!byCell.has(product.cellId)) byCell.set(product.cellId, { cellId: product.cellId, picks: [] });
-    byCell.get(product.cellId).picks.push(pick);
+    pick.candidateCellIds = cellIds;
+    pickByProduct.set(pid, pick);
   }
 
-  if (byCell.size === 0 && unplaced.length > 0) {
+  if (pickByProduct.size === 0 && unplaced.length > 0) {
     toast('No products are placed on the map', true);
     return null;
   }
 
-  // Greedy nearest-neighbor tour from entrance, back to entrance
-  const stops = [...byCell.values()];
+  // Greedy nearest-neighbor tour from entrance, back to entrance.
+  // Stops are built as we go: each iteration picks the closest (product, location) pair,
+  // and then groups any other products at that same chosen cell into the same stop.
   const ordered = [];
   let current = entrance.id;
-  const remaining = new Set(stops.map((_, i) => i));
-  while (remaining.size > 0) {
-    let bestIdx = -1;
-    let bestDist = Infinity;
-    for (const i of remaining) {
-      const d = bfsDistance(current, stops[i].cellId).dist;
-      if (d < bestDist) { bestDist = d; bestIdx = i; }
+  const remainingProducts = new Set(pickByProduct.keys());
+  // Cache BFS distances (from -> to) so we don't recompute across iterations
+  const distCache = new Map();
+  const dist = (from, to) => {
+    const key = from + '|' + to;
+    if (distCache.has(key)) return distCache.get(key);
+    const d = bfsDistance(from, to).dist;
+    distCache.set(key, d);
+    return d;
+  };
+
+  while (remainingProducts.size > 0) {
+    // Find the (product, cellId) pair minimizing distance from current
+    let bestPid = null, bestCell = null, bestDist = Infinity;
+    for (const pid of remainingProducts) {
+      const pick = pickByProduct.get(pid);
+      for (const cid of pick.candidateCellIds) {
+        const d = dist(current, cid);
+        if (d < bestDist) { bestDist = d; bestPid = pid; bestCell = cid; }
+      }
     }
-    if (bestIdx === -1) {
-      // Remaining stops are unreachable from current — append them at the end in arbitrary order
-      for (const i of remaining) ordered.push(stops[i]);
+    if (bestPid === null) {
+      // Unreachable remaining — just place them somewhere
+      for (const pid of remainingProducts) {
+        const pick = pickByProduct.get(pid);
+        const cid = pick.candidateCellIds[0];
+        ordered.push({ cellId: cid, picks: [pick] });
+      }
       break;
     }
-    ordered.push(stops[bestIdx]);
-    remaining.delete(bestIdx);
-    current = stops[bestIdx].cellId;
+
+    // Collect ALL products whose best location is this same cell, at roughly the same distance
+    const stopPicks = [pickByProduct.get(bestPid)];
+    remainingProducts.delete(bestPid);
+    for (const pid of Array.from(remainingProducts)) {
+      const pick = pickByProduct.get(pid);
+      if (pick.candidateCellIds.includes(bestCell)) {
+        // If this cell is among its options and is also its current-best (or very close),
+        // prefer grouping it here.
+        const myBest = Math.min(...pick.candidateCellIds.map(cid => dist(current, cid)));
+        const thisDist = dist(current, bestCell);
+        if (thisDist <= myBest) {
+          stopPicks.push(pick);
+          remainingProducts.delete(pid);
+        }
+      }
+    }
+
+    ordered.push({ cellId: bestCell, picks: stopPicks });
+    current = bestCell;
   }
+  // Clean up: remove the candidateCellIds helper field from picks (they're no longer needed)
+  ordered.forEach(stop => stop.picks.forEach(p => { delete p.candidateCellIds; }));
 
   // Attach machine to each stop, mark done:false
   for (const stop of ordered) {
@@ -566,13 +859,17 @@ function renderInventory() {
   }
 
   items.forEach(p => {
-    const cell = p.cellId ? findCellById(p.cellId) : null;
+    const cellIds = Array.isArray(p.cellIds) ? p.cellIds : [];
+    const cells = cellIds.map(id => findCellById(id)).filter(Boolean);
+    const locLabel = cells.length === 0
+      ? '◌ UNASSIGNED'
+      : '◉ ' + cells.map(c => escapeHtml(c.label)).join(', ');
     const card = document.createElement('div');
     card.className = 'product-card';
     card.innerHTML = `
       <div class="product-info">
         <div class="product-name">${escapeHtml(p.name)}</div>
-        <div class="product-loc ${!cell ? 'unassigned' : ''}">${cell ? '◉ ' + escapeHtml(cell.label) : '◌ UNASSIGNED'}</div>
+        <div class="product-loc ${cells.length === 0 ? 'unassigned' : ''}">${locLabel}</div>
       </div>
       <div class="product-pot">${escapeHtml(p.potSize || '?')}</div>
       <button class="icon-btn" data-edit="${p.id}" style="width:36px; height:36px; font-size:14px;">✎</button>
@@ -590,7 +887,7 @@ function renderMap() {
   const grid = $('#facility-map');
   const { cols, rows, cells } = state.map;
   // Dynamic cell min-size: shrink for larger grids so everything fits without being microscopic
-  const minCell = cols > 30 ? 16 : cols > 20 ? 22 : 32;
+  const minCell = cols > 40 ? 13 : cols > 30 ? 16 : cols > 20 ? 22 : 32;
   grid.style.gridTemplateColumns = `repeat(${cols}, minmax(${minCell}px, 1fr))`;
   grid.innerHTML = '';
 
@@ -600,11 +897,13 @@ function renderMap() {
   const wrap = grid.parentElement;
   if (wrap) wrap.classList.toggle('config-painting', ui.mapMode === 'config');
 
-  // count products per zone
+  // count products per zone (products can have multiple locations)
   const countByCell = new Map();
   for (const p of state.products) {
-    if (!p.cellId) continue;
-    countByCell.set(p.cellId, (countByCell.get(p.cellId) || 0) + 1);
+    const ids = Array.isArray(p.cellIds) ? p.cellIds : [];
+    for (const cid of ids) {
+      countByCell.set(cid, (countByCell.get(cid) || 0) + 1);
+    }
   }
 
   cells.forEach(cell => {
@@ -736,8 +1035,12 @@ function applyPaint(cellId) {
       toast('Cannot erase the entrance', true);
       return;
     }
-    // If a product is on this cell, unassign it
-    state.products.forEach(p => { if (p.cellId === cell.id) p.cellId = null; });
+    // If products reference this cell, remove this cell from their cellIds array
+    state.products.forEach(p => {
+      if (Array.isArray(p.cellIds)) {
+        p.cellIds = p.cellIds.filter(id => id !== cell.id);
+      }
+    });
     cell.type = 'blocked';
     cell.label = '';
     cell.customLabel = false;
@@ -761,7 +1064,7 @@ function renderMapCell(cellId) {
   if (!cell) return;
   el.className = 'map-cell ' + cell.type;
   if (cell.id === ui.selectedCellId) el.classList.add('selected');
-  const productCount = state.products.filter(p => p.cellId === cellId).length;
+  const productCount = state.products.filter(p => Array.isArray(p.cellIds) && p.cellIds.includes(cellId)).length;
   if (cell.type === 'zone' && productCount > 0) el.classList.add('has-products');
   if (cell.type === 'zone' && cell.customLabel) el.classList.add('custom-label');
   const showLabel = (cell.type === 'entrance') || (cell.type === 'zone' && state.map.cols <= 30);
@@ -803,7 +1106,7 @@ function renderMapInfo() {
     return;
   }
   // zone
-  const products = state.products.filter(p => p.cellId === cell.id);
+  const products = state.products.filter(p => Array.isArray(p.cellIds) && p.cellIds.includes(cell.id));
   if (products.length === 0) {
     box.innerHTML = `<strong>${escapeHtml(cell.label)}</strong> · empty · <em style="color:var(--ink-dim)">Assign products in Inventory.</em>`;
     return;
@@ -814,8 +1117,8 @@ function renderMapInfo() {
 
 function clearMap() {
   if (!confirm('Clear the entire map? All cells will be reset to blocked and all products will be unassigned.')) return;
-  // Unassign all products
-  state.products.forEach(p => { p.cellId = null; });
+  // Unassign all products (clear their location arrays)
+  state.products.forEach(p => { p.cellIds = []; });
   // Reset every cell to blocked, keep entrance if we have one
   const entrance = getEntrance();
   state.map.cells.forEach(cell => {
@@ -848,15 +1151,22 @@ function applyGridSize() {
   state.map.cells.forEach(c => {
     if (c.r >= newRows || c.c >= newCols) removedCellIds.add(c.id);
   });
-  const removedProducts = state.products.filter(p => removedCellIds.has(p.cellId)).length;
+  // Count products that will LOSE at least one location
+  const affectedProducts = state.products.filter(p =>
+    Array.isArray(p.cellIds) && p.cellIds.some(id => removedCellIds.has(id))
+  ).length;
 
   let msg = `Resize grid to ${newCols} × ${newRows}?`;
   if (removedCellIds.size > 0) msg += ` ${removedCellIds.size} cell${removedCellIds.size !== 1 ? 's' : ''} will be removed.`;
-  if (removedProducts > 0) msg += ` ${removedProducts} product${removedProducts !== 1 ? 's' : ''} will be unassigned.`;
+  if (affectedProducts > 0) msg += ` ${affectedProducts} product${affectedProducts !== 1 ? 's' : ''} will lose a location.`;
   if (!confirm(msg)) return;
 
-  // Unassign affected products
-  state.products.forEach(p => { if (removedCellIds.has(p.cellId)) p.cellId = null; });
+  // Remove affected cell IDs from each product's locations array
+  state.products.forEach(p => {
+    if (Array.isArray(p.cellIds)) {
+      p.cellIds = p.cellIds.filter(id => !removedCellIds.has(id));
+    }
+  });
 
   // Build the new grid, copying existing cells where they fit
   const oldCells = new Map(state.map.cells.map(c => [c.id, c]));
@@ -937,28 +1247,50 @@ function closeModal() {
 
 function openProductModal(productId) {
   const isNew = !productId;
-  const p = isNew ? { name: '', potSize: state.potSizes[0], cellId: '' } : findProductById(productId);
+  const p = isNew
+    ? { name: '', potSize: state.potSizes[0], cellIds: [] }
+    : findProductById(productId);
   if (!isNew && !p) return;
+  const pCellIds = Array.isArray(p.cellIds) ? p.cellIds.slice() : [];
 
-  const zones = state.map.cells.filter(c => c.type === 'zone');
+  // Group zone cells by label so "C3" (multi-cell zone) shows as a single entry
+  const zoneGroups = new Map(); // label -> { label, cellIds: [] }
+  state.map.cells.filter(c => c.type === 'zone').forEach(c => {
+    const key = c.label || c.id;
+    if (!zoneGroups.has(key)) zoneGroups.set(key, { label: key, cellIds: [] });
+    zoneGroups.get(key).cellIds.push(c.id);
+  });
+  // Sort by label for readability
+  const groups = [...zoneGroups.values()].sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
+
+  // A zone group is considered "selected" if ANY of its cell IDs is in pCellIds.
+  // When saving, we keep exactly one representative cell per selected zone (whichever was selected before,
+  // otherwise the first cell of that zone's group).
+  const isGroupSelected = (g) => g.cellIds.some(id => pCellIds.includes(id));
+  const representativeFor = (g) => {
+    const existing = g.cellIds.find(id => pCellIds.includes(id));
+    return existing || g.cellIds[0];
+  };
+
   const html = `
     <div class="form-field">
       <label class="form-label">Product name</label>
       <input type="text" class="form-input" id="prod-name" value="${escapeHtml(p.name)}" placeholder="Japanese Maple" />
     </div>
-    <div class="form-row">
-      <div class="form-field">
-        <label class="form-label">Pot size</label>
-        <select class="form-select" id="prod-pot">
-          ${state.potSizes.map(s => `<option ${s === p.potSize ? 'selected' : ''}>${escapeHtml(s)}</option>`).join('')}
-        </select>
-      </div>
-      <div class="form-field">
-        <label class="form-label">Location</label>
-        <select class="form-select" id="prod-loc">
-          <option value="">— Unassigned —</option>
-          ${zones.map(z => `<option value="${z.id}" ${z.id === p.cellId ? 'selected' : ''}>${escapeHtml(z.label)}</option>`).join('')}
-        </select>
+    <div class="form-field">
+      <label class="form-label">Pot size</label>
+      <select class="form-select" id="prod-pot">
+        ${state.potSizes.map(s => `<option ${s === p.potSize ? 'selected' : ''}>${escapeHtml(s)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-field">
+      <label class="form-label">Locations (tap to toggle)</label>
+      <div class="zone-chips" id="prod-locs">
+        ${groups.map(g => `
+          <button type="button" class="zone-chip ${isGroupSelected(g) ? 'selected' : ''}" data-zone="${escapeHtml(g.label)}">
+            ${escapeHtml(g.label)}
+          </button>
+        `).join('')}
       </div>
     </div>
     <div class="button-row" style="margin-top: 14px;">
@@ -968,16 +1300,26 @@ function openProductModal(productId) {
   `;
   openModal(isNew ? 'New Product' : 'Edit Product', html);
 
+  // Chip toggling
+  $$('#prod-locs .zone-chip').forEach(btn => {
+    btn.addEventListener('click', () => btn.classList.toggle('selected'));
+  });
+
   $('#prod-save').addEventListener('click', () => {
     const name = $('#prod-name').value.trim();
     const potSize = $('#prod-pot').value;
-    const cellId = $('#prod-loc').value || null;
     if (!name) { toast('Name required', true); return; }
+    // Gather selected zones and convert to one representative cell per zone
+    const selectedZones = $$('#prod-locs .zone-chip.selected').map(el => el.dataset.zone);
+    const newCellIds = selectedZones.map(label => {
+      const group = zoneGroups.get(label);
+      return representativeFor(group);
+    });
     if (isNew) {
-      state.products.push({ id: uid('p'), name, potSize, cellId });
+      state.products.push({ id: uid('p'), name, potSize, cellIds: newCellIds });
       toast('Added');
     } else {
-      p.name = name; p.potSize = potSize; p.cellId = cellId;
+      p.name = name; p.potSize = potSize; p.cellIds = newCellIds;
       toast('Saved');
     }
     closeModal();
@@ -1115,7 +1457,7 @@ function handleBulkImport() {
     if (!product) {
       // match pot size from list (case insensitive)
       const matchedPot = state.potSizes.find(s => s.toLowerCase() === potSize.toLowerCase()) || potSize;
-      product = { id: uid('p'), name: prodName, potSize: matchedPot, cellId: null };
+      product = { id: uid('p'), name: prodName, potSize: matchedPot, cellIds: [] };
       state.products.push(product);
     }
 
@@ -1382,6 +1724,17 @@ function wipeData() {
   render();
 }
 
+function loadBuckJonesPreset() {
+  if (!confirm('Replace the current map and inventory with the Buck Jones Nursery preset? Your orders and run history will be kept.')) return;
+  state.map = defaultMap();
+  state.products = defaultProducts(state.map);
+  // Cancel any active run since the map/products just changed
+  state.run = null;
+  saveState();
+  toast('Buck Jones preset loaded');
+  render();
+}
+
 /* ---------------- EVENT WIRING ---------------- */
 function init() {
   // tabs
@@ -1455,6 +1808,7 @@ function init() {
   $('#import-data').addEventListener('click', importData);
   $('#import-file').addEventListener('change', handleImportFile);
   $('#wipe-data').addEventListener('click', wipeData);
+  $('#load-preset').addEventListener('click', loadBuckJonesPreset);
 
   // modal
   $('#modal-close').addEventListener('click', closeModal);
@@ -1477,8 +1831,9 @@ function init() {
 }
 
 function seedSampleData() {
-  // Map is blank by default — no zones to seed products into.
-  // First-time users are guided to the Map tab via the empty-state hint on the Inventory page.
+  // On a fresh install, pre-load the Buck Jones Nursery inventory so users see a working app.
+  // Products are linked to zones in the default map by label.
+  state.products = defaultProducts(state.map);
 }
 
 document.addEventListener('DOMContentLoaded', init);

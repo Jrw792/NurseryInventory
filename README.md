@@ -13,24 +13,34 @@ The service worker caches all assets on first load, so after that it works with 
 
 ## Quick Start
 
-The app launches with a blank 35×50 grid — every cell is "blocked" (unwalkable) except one entrance at the bottom. You paint the facility layout in Map → CONFIG:
+The app launches pre-loaded with the **Buck Jones Nursery** facility map (45×55 grid, ~50 labeled zones) and inventory (97 products mapped to their zones). Products that were listed in multiple zones on the inventory sheet (e.g. "Azalea (shade) A5, A6, B6") are stored as multi-location products — the router picks whichever copy is closest to the current route position.
 
-1. **Map tab → CONFIG** opens the paint palette. Pick a tool, then tap or drag across cells to paint them. Five tools:
-   - **AISLE** — walkable paths (cost 1 to traverse, preferred by router)
-   - **ZONE** — product bays (cost 3 to traverse — passable but the router avoids them when possible)
-   - **ENTRANCE** — where the route starts and ends; there's always exactly one, so setting a new one clears the old
-   - **ERASE** — reverts a cell back to blocked (unwalkable). Also unassigns any product sitting on it
-   - **LABEL** — tap a zone to give it a custom name like "Greenhouse 3" or "Field A-North"
-   - **CLEAR ALL** wipes every cell back to blocked (except the entrance) and unassigns all products. Useful for starting over.
-2. **Settings → MAP GRID SIZE** resizes the grid. Shrinking removes out-of-bounds cells and unassigns any products on them (products stay in Inventory, they just lose their location).
-3. **Inventory tab → + PRODUCT** to add products. Assign each to a zone cell. Products without locations will be listed as "not on map" when routes are built.
-4. **Orders tab** — paste rows in the format `order#, product, qty, pot size` (one per line). Missing products are created automatically with the pot size you provide. Or tap + ORDER for a manual entry form.
-5. **Run tab → BUILD ROUTE** — the app plans a greedy nearest-neighbor route starting and ending at the Entrance, aggregating quantities of the same product across orders into a single pick.
-6. Toggle **BY ROUTE / BY ORDER** on the run view. BY ROUTE is the picking workflow; BY ORDER is the staging/sorting workflow after picking is done.
-7. Tap the checkbox on each pick as it's completed.
-8. **COMPLETE** archives the run to History (with CSV export) and clears the current orders for the next day.
+### If you already have a Nursery Ops install from v1 or v2
 
-### Tips for laying out a real facility
+The Buck Jones preset does NOT automatically replace your existing layout on an upgrade. To load it into an existing install, go to **Settings → PRESETS → LOAD BUCK JONES PRESET**. This replaces the map + inventory but keeps your orders and run history.
+
+### If you want to build a different nursery from scratch
+
+Go to **Settings → DATA → WIPE ALL** to reset, then use **Map → CONFIG** to paint your own layout. Paint palette has five tools:
+
+- **AISLE** — walkable paths (cost 1 to traverse, preferred by router)
+- **ZONE** — product bays (cost 3 to traverse — passable but the router avoids them when possible)
+- **ENTRANCE** — where the route starts and ends; there's always exactly one
+- **ERASE** — reverts a cell back to blocked (unwalkable). Also unassigns any product there
+- **LABEL** — tap a zone to give it a custom name like "Greenhouse 3" or "Field A-North"
+- **CLEAR ALL** wipes every cell back to blocked (except the entrance)
+
+**Settings → MAP GRID SIZE** resizes the grid. Shrinking removes out-of-bounds cells; products on those cells lose that location but stay in Inventory.
+
+### Daily workflow
+
+1. **Orders tab** — paste rows in the format `order#, product, qty, pot size` (one per line). Missing products are created automatically. Or tap + ORDER for a manual entry form.
+2. **Run tab → BUILD ROUTE** — the app plans a greedy nearest-neighbor route starting and ending at the Entrance, aggregating quantities of the same product across orders into a single pick. For multi-location products, each stop uses whichever location is closest.
+3. Toggle **BY ROUTE / BY ORDER** on the run view. BY ROUTE is the picking workflow; BY ORDER is the staging/sorting workflow after picking is done.
+4. Tap the checkbox on each pick as it's completed.
+5. **COMPLETE** archives the run to History (with CSV export) and clears the current orders for the next day.
+
+### Tips for laying out a custom facility
 
 - Start with ENTRANCE tool and place the loading dock where it actually is.
 - Switch to AISLE tool and sketch the main roads/corridors the worker and vehicles use. Drag your finger to paint in strokes.
